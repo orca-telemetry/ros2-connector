@@ -37,3 +37,30 @@ pub fn ringBuffer(comptime capacity: usize) type {
         }
     };
 }
+
+pub fn multiChannelRingBuffer(comptime channels: usize, comptime capacity: usize) type {
+    const V = @Vector(channels, f64);
+    return struct {
+        buffer: [capacity]V = undefined,
+        start: usize = 0,
+        end: usize = 0,
+        count: usize = 0,
+
+        const Self = @This();
+
+        pub fn push(self: *Self, value: V) !void {
+            if (self.count == capacity) return error.BufferFull;
+            self.buffer[self.end] = value;
+            self.end = (self.end + 1) % capacity;
+            self.count += 1;
+        }
+
+        pub fn pop(self: *Self) ?V {
+            if (self.count == 0) return null;
+            const value = self.buffer[self.start];
+            self.start = (self.start + 1) % capacity;
+            self.count -= 1;
+            return value;
+        }
+    };
+}
