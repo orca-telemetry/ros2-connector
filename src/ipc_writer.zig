@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig").c;
+const ah = @import("c.zig").ah;
 const schema = @import("schema.zig");
 const cb = @import("column_buffer.zig");
 const tb = @import("topic_buffer.zig");
@@ -8,6 +9,7 @@ const FlatField = schema.FlatField;
 const FieldType = schema.FieldType;
 const TopicBuffer = tb.TopicBuffer;
 const FLUSH_THRESHOLD = cb.FLUSH_THRESHOLD;
+const IPCWriterError = error{ NanoarrowArrayViewInitFailed, NanoarrowArrayViewSetFailed };
 
 /// One IPC stream writer per topic.
 /// Owns the output file and nanoarrow writer state.
@@ -82,7 +84,7 @@ pub const IpcWriter = struct {
     }
 
     /// Drain the TopicBuffer and write one Arrow IPC record batch.
-    pub fn flush(self: *IpcWriter, topic: *TopicBuffer) !void {
+    pub fn flush(self: *IpcWriter, topic: *TopicBuffer) !void { // FIXME: use error type to robustly type this with the types defined at top of file
         const n_rows = try topic.drain(self.drain_bufs);
         if (n_rows == 0) return;
 
@@ -96,30 +98,42 @@ pub const IpcWriter = struct {
         }
         defer _ = c.ArrowArrayRelease(&array);
 
-        if (c.ArrowArrayStartAppending(&array) != 0) {
-            return error.NanoarrowArrayStartFailed;
-        }
+        // if (c.ArrowArrayStartAppending(&array) != 0) {
+        //     return error.NanoarrowArrayStartFailed;
+        // }
 
         // Populate each child array (column) from drain buffer
         for (topic.columns, 0..) |col, i| {
-            const child = c.ArrowArrayAllocateChildren(&array, @intCast(i));
             const buf = self.drain_bufs[i][0 .. n_rows * col.field_type.stride()];
 
             if (col.field_type == .string) {
-                try appendStringColumn(child, buf, n_rows, col.field_type.stride(), &err);
+                try appendStringColumn(&array, buf, n_rows, col.field_type.stride(), &err);
             } else {
-                try appendPrimitiveColumn(child, buf, n_rows, col.field_type.stride(), &err);
+                try appendPrimitiveColumn(&array, buf, n_rows, col.field_type.stride(), &err);
             }
         }
 
-        if (c.ArrowArrayFinishBuilding(&array, &err) != 0) {
+        if (c.ArrowArrayFinishBuilding(&array, c.NANOARROW_VALIDATION_LEVEL_DEFAULT, &err) != 0) {
             std.debug.print("ArrowArrayFinishBuilding: {s}\n", .{err.message});
             return error.NanoarrowArrayFinishFailed;
         }
 
         array.length = @intCast(n_rows);
 
-        if (c.ArrowIpcWriterWriteArrayView(&self.writer, &array, &err) != 0) {
+        // Build an ArrowArrayView from the finished ArrowArray
+        var array_view: c.ArrowArrayView = undefined;
+        if (c.ArrowArrayViewInitFromSchema(&array_view, &self.arrow_schema, &err) != 0) {
+            std.debug.print("ArrowArrayViewInitFromSchema: {s}\n", .{err.message});
+            return error.NanoarrowArrayViewInitFailed;
+        }
+        defer c.ArrowArrayViewReset(&array_view);
+
+        if (c.ArrowArrayViewSetArray(&array_view, &array, &err) != 0) {
+            std.debug.print("ArrowArrayViewSetArray: {s}\n", .{err.message});
+            return error.NanoarrowArrayViewSetFailed;
+        }
+
+        if (c.ArrowIpcWriterWriteArrayView(&self.writer, &array_view, &err) != 0) {
             std.debug.print("ArrowIpcWriterWriteArrayView: {s}\n", .{err.message});
             return error.NanoarrowWriteBatchFailed;
         }
@@ -228,7 +242,7 @@ fn appendPrimitiveColumn(
     if (c.ArrowBufferResize(data_buf, @intCast(buf.len), 0) != 0) {
         return error.NanoarrowBufferResizeFailed;
     }
-    @memcpy(data_buf.data[0..buf.len], buf);
+    @memcpy(data_buf.*.data[0..buf.len], buf);
     child.length = @intCast(n_rows);
     _ = stride;
     _ = err;
@@ -252,7 +266,7 @@ fn appendStringColumn(
             .data = .{ .as_uint8 = slot.ptr },
             .size_bytes = @intCast(actual_len),
         };
-        if (c.ArrowArrayAppendBytes(child, view, err) != 0) {
+        if (c.arrow_array_append_bytes(child, view) != 0) {
             std.debug.print("ArrowArrayAppendBytes: {s}\n", .{err.message});
             return error.NanoarrowAppendFailed;
         }

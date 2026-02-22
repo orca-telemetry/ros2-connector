@@ -18,9 +18,11 @@ pub fn build(b: *std.Build) void {
         .files = &.{
             "vendor/nanoarrow/nanoarrow.c",
             "vendor/nanoarrow/nanoarrow_ipc.c",
+            "vendor/nanoarrow/arrow_helpers.c",
         },
         .flags = &.{"-std=c11"},
     });
+
     nanoarrow.addIncludePath(b.path("vendor/nanoarrow"));
     nanoarrow_mod.link_libc = true;
 

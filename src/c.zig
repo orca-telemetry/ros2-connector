@@ -7,4 +7,5 @@ pub const c = @cImport({
     @cInclude("dlfcn.h");
     @cInclude("nanoarrow.h");
     @cInclude("nanoarrow_ipc.h");
+    @cInclude("arrow_helpers.h");
 });
