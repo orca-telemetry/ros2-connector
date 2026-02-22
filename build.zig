@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     nanoarrow.addCSourceFiles(.{
         .files = &.{
             "vendor/nanoarrow/nanoarrow.c",
+            "vendor/nanoarrow/flatcc.c",
             "vendor/nanoarrow/nanoarrow_ipc.c",
             "vendor/nanoarrow/arrow_helpers.c",
         },
