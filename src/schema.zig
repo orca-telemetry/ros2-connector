@@ -2,14 +2,30 @@ const std = @import("std");
 const c = @import("c.zig").c;
 
 pub const MAX_STRING_LEN: usize = 256;
+pub const MAX_FLATTEN_DEPTH: u32 = 32;
 
-/// A fully resolved, flattened field — no nesting, dotted name
+pub const SchemaError = error{
+    TypeSupportNotFound,
+    MaxFlattenDepthExceeded,
+    InvalidTypeName,
+    TypeSupportFunctionNotFound,
+    TypeSupportNull,
+};
+
+// A work item pushed onto the explicit stack instead of using recursion.
+const FlattenTask = struct {
+    members: *const c.rosidl_typesupport_introspection_c__MessageMembers,
+    prefix: []const u8,
+    depth: u32,
+};
+
+/// A fully resolved, flattened ROS field - no nesting, dotted name
 pub const FlatField = struct {
     /// e.g. "pose.position.x"
     name: []const u8,
     field_type: FieldType,
-    /// Byte offset into the deserialised C struct produced by rcl_take.
-    /// For nested fields this is parent_offset + member.offset_.
+    /// byte offset into the deserialised C struct produced by rcl_take.
+    /// for nested fields this is parent_offset + member.offset_.
     offset: usize,
 
     pub fn stride(self: FlatField) usize {
@@ -17,6 +33,8 @@ pub const FlatField = struct {
     }
 };
 
+/// list of field types supported by this collector,
+/// and the mapping to their stride
 pub const FieldType = enum {
     int8,
     uint8,
@@ -40,12 +58,12 @@ pub const FieldType = enum {
             .int16, .uint16 => 2,
             .int32, .uint32, .float32 => 4,
             .int64, .uint64, .float64 => 8,
-            .long_double => 16,
-            .string => MAX_STRING_LEN,
+            .long_double => 16, // long_double is 128bits in ROS, as opposed to zigs 80
+            .string => MAX_STRING_LEN, // has to be capped. we can't do variable length string messages
         };
     }
 
-    /// Map from the string names returned by getFieldTypeName()
+    /// map from the string names returned by getFieldTypeName()
     pub fn fromRosName(name: []const u8) ?FieldType {
         const map = std.StaticStringMap(FieldType).initComptime(.{
             .{ "int8", .int8 },
@@ -72,7 +90,7 @@ pub const FieldType = enum {
         return map.get(name);
     }
 
-    /// Arrow format string for nanoarrow schema construction
+    /// arrow format string for nanoarrow schema construction
     pub fn arrowFormat(self: FieldType) [*:0]const u8 {
         return switch (self) {
             .int8 => "c",
@@ -88,26 +106,26 @@ pub const FieldType = enum {
             .int64 => "l",
             .uint64 => "L",
             .float64 => "g",
-            .long_double => "g", // no 128-bit float in Arrow — downcast to f64
+            .long_double => "g", // no 128-bit float in Arrow - downcast to f64
             .string => "z", // binary, fixed width handled by stride
         };
     }
 };
 
-/// Recursively flatten a ROS message type into a []FlatField.
+/// Flatten a ROS message type into a []FlatField.
 /// All allocations go into the provided allocator (expected to be an arena).
-/// `prefix` is the dotted path so far e.g. "pose.position"
+/// `prefix` is the dotted path to prefix to the final path.
 /// Load type support for `type_name_cstr`, flatten all fields into `out`,
 /// and return the type support handle.
 ///
-/// The underlying .so is intentionally NOT dlclose'd — the handle must remain
+/// The underlying .so is intentionally NOT dlclose'd - the handle must remain
 /// valid for the lifetime of the process. The OS reclaims it on exit.
 pub fn flattenMessageType(
     allocator: std.mem.Allocator,
     type_name_cstr: [*c]const u8,
     prefix: []const u8,
     out: *std.ArrayList(FlatField),
-) !*const c.rosidl_message_type_support_t {
+) SchemaError!*const c.rosidl_message_type_support_t {
     const type_name = std.mem.span(type_name_cstr);
 
     var parts = std.mem.splitSequence(u8, type_name, "/");
@@ -144,76 +162,57 @@ pub fn flattenMessageType(
     const intro_ts: *const c.rosidl_typesupport_introspection_c__MessageMembers =
         @ptrCast(@alignCast(type_support.data));
 
-    try flattenNestedMembers(allocator, intro_ts, prefix, 0, out);
+    // --- iterative flattening ---
+    var stack = std.ArrayList(FlattenTask).init(allocator);
+    defer stack.deinit();
 
-    return type_support;
-}
+    try stack.append(.{ .members = intro_ts, .prefix = prefix, .depth = 0 });
 
-/// Recurse into an already-loaded nested MessageMembers (no dlopen needed).
-/// `parent_offset` is the byte offset of the containing struct within the
-/// top-level message struct — accumulated as we recurse deeper.
-fn flattenNestedMembers(
-    allocator: std.mem.Allocator,
-    members: *const c.rosidl_typesupport_introspection_c__MessageMembers,
-    prefix: []const u8,
-    parent_offset: usize,
-    out: *std.ArrayList(FlatField),
-) !void {
-    var i: u32 = 0;
-    while (i < members.member_count_) : (i += 1) {
-        const member = &members.members_[i];
-        const member_name = std.mem.span(member.name_);
-        const abs_offset = parent_offset + member.offset_;
+    while (stack.items.len > 0) {
+        const task = stack.pop();
 
-        const dotted_name = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}.{s}", .{ prefix, member_name })
-        else
-            try allocator.dupe(u8, member_name);
+        if (task.depth >= MAX_FLATTEN_DEPTH) {
+            std.debug.print(
+                "Error: Max flatten depth ({d}) exceeded at prefix '{s}'\n",
+                .{ MAX_FLATTEN_DEPTH, task.prefix },
+            );
+            return error.MaxFlattenDepthExceeded;
+        }
 
-        if (member.type_id_ == c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_NESTED_TYPE) {
-            if (member.members_ != null) {
-                // Cast from the generic type support pointer to the introspection
-                // members struct — same pattern as casting type_support.data above
-                const nested: *const c.rosidl_typesupport_introspection_c__MessageMembers =
-                    @ptrCast(@alignCast(member.members_));
-                try flattenNestedMembers(allocator, nested, dotted_name, abs_offset, out);
+        const members = task.members;
+        for (0..members.member_count_) |i| {
+            const member = &members.members_[i];
+            const field_name = std.mem.span(member.name_);
+
+            // build the dotted path for this field
+            const full_name = if (task.prefix.len > 0)
+                try std.fmt.allocPrint(allocator, "{s}.{s}", .{ task.prefix, field_name })
+            else
+                try allocator.dupe(u8, field_name);
+
+            if (member.type_id_ == c.rosidl_typesupport_introspection_c__ROS_TYPE_MESSAGE) {
+                // nested message - push onto stack rather than recurse
+                const nested_ts: *const c.rosidl_typesupport_introspection_c__MessageMembers =
+                    @ptrCast(@alignCast(member.members_.?.data));
+                try stack.append(.{
+                    .members = nested_ts,
+                    .prefix = full_name,
+                    .depth = task.depth + 1,
+                });
             } else {
-                std.debug.print("Warning: nested type {s} has no members, skipping\n", .{dotted_name});
+                // primitive field - emit directly
+                try out.append(.{
+                    .name = full_name,
+                    .type_id = member.type_id_,
+                    .offset = member.offset_,
+                    .is_array = member.is_array_,
+                    .array_size = member.array_size_,
+                    .is_upper_bound = member.is_upper_bound_,
+                });
             }
-        } else {
-            const ros_type_name = rosTypeIdToName(member.type_id_);
-            const field_type = FieldType.fromRosName(ros_type_name) orelse {
-                std.debug.print("Warning: unknown type '{s}' for field {s}, skipping\n", .{ ros_type_name, dotted_name });
-                continue;
-            };
-            try out.append(allocator, .{
-                .name = dotted_name,
-                .field_type = field_type,
-                .offset = abs_offset,
-            });
         }
     }
-}
+    // --- end iterative flattening ---
 
-fn rosTypeIdToName(type_id: u8) []const u8 {
-    return switch (type_id) {
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_INT8 => "int8",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_UINT8 => "uint8",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_INT16 => "int16",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_UINT16 => "uint16",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_INT32 => "int32",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_UINT32 => "uint32",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_INT64 => "int64",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_UINT64 => "uint64",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_FLOAT => "float",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_DOUBLE => "double",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_LONG_DOUBLE => "long_double",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_CHAR => "char",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_WCHAR => "wchar",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_BOOLEAN => "boolean",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_BYTE => "byte",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_STRING => "string",
-        c.ROSIDL_DYNAMIC_TYPESUPPORT_FIELD_TYPE_WSTRING => "wstring",
-        else => "unknown",
-    };
+    return type_support;
 }
