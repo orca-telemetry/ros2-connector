@@ -1,7 +1,8 @@
 /// Contains a single channel ring buffer
 const std = @import("std");
+const testing = std.testing;
 
-const RingBufferError = error{
+pub const RingBufferError = error{
     BufferFull,
     BufferEmpty,
     DestTooSmall,
@@ -16,9 +17,8 @@ pub fn RingBuffer(comptime capacity: usize) type {
     // handle them?
     std.debug.assert(capacity % 2 == 0);
 
-    // capacity is in bytes
     return struct {
-        buffer: [capacity]u8 = undefined,
+        buffer: [capacity]u8 = undefined, // capacity is in bytes
         start: usize = 0,
         end: usize = 0,
         count: usize = 0, // bytes used - not the number of elements
@@ -26,6 +26,7 @@ pub fn RingBuffer(comptime capacity: usize) type {
 
         const Self = @This();
 
+        /// how many bytes does each element take up?
         pub fn init(stride: usize) Self {
             std.debug.assert(stride > 0);
             std.debug.assert(stride % 2 == 0);
@@ -49,10 +50,10 @@ pub fn RingBuffer(comptime capacity: usize) type {
             return capacity / self.stride;
         }
 
-        /// push one element (must be exactly stride bytes)
+        /// push one element
         pub fn push(self: *Self, value: []const u8) RingBufferError!void {
             if (value.len != self.stride) return error.StrideMismatch;
-            if (self.count + self.stride >= capacity) return error.BufferFull;
+            if (self.count + self.stride > capacity) return error.BufferFull;
 
             const end = self.end;
             // lt only here becuase of 0 indexing

@@ -84,3 +84,7 @@ pub fn main() !void {
     std.debug.print("Shutdown signal received. Flushing and closing files...\n", .{});
     // pipeline.deinit() flushes and closes all IPC writers via defer above
 }
+
+test {
+    _ = @import("main_test.zig");
+}
