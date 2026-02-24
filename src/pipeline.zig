@@ -1,86 +1,32 @@
 const std = @import("std");
 const c = @import("c.zig").c;
-const schema = @import("schema.zig");
 const tb = @import("topic_buffer.zig");
 const mcap = @import("mcap_writer.zig");
+const Config = @import("config.zig").Config;
 
-const FlatField = schema.FlatField;
 const TopicSpec = tb.TopicSpec;
-const TopicBufferPool = tb.TopicBufferPool;
-const IpcWriterPool = mcap.IpcWriterPool;
+const MessageBufferPool = tb.MessageBufferPool;
+const McapWriterPool = mcap.McapWriterPool;
 
 // ---------------------------------------------------------------------------
-// Config parsing
-// ---------------------------------------------------------------------------
-
-const TopicConfig = struct {
-    type_name: []const u8,
-    topic_name: []const u8,
-};
-
-fn parseConfig(allocator: std.mem.Allocator, path: []const u8) ![]TopicConfig {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const contents = try file.readToEndAlloc(allocator, 64 * 1024);
-
-    var list: std.ArrayList(TopicConfig) = .empty;
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \r\t");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        var parts = std.mem.splitScalar(u8, trimmed, ':');
-        const type_name = parts.next() orelse continue;
-        const topic_name = parts.next() orelse continue;
-        try list.append(allocator, .{
-            .type_name = try allocator.dupe(u8, type_name),
-            .topic_name = try allocator.dupe(u8, topic_name),
-        });
-    }
-    return list.toOwnedSlice(allocator);
-}
-
-// ---------------------------------------------------------------------------
-// Subscription
+// Subscription — uses rcl_take_serialized_message instead of rcl_take
 // ---------------------------------------------------------------------------
 
 const Subscription = struct {
     sub: c.rcl_subscription_t,
     topic_name: []const u8,
-    /// Pointer into TopicBufferPool — no ownership
-    buf: *tb.TopicBuffer,
-    /// Type support handle — kept alive for the life of the subscription
-    type_support: *const c.rosidl_message_type_support_t,
-    /// Allocated message struct via type support init_function
-    msg_buf: []u8,
-    /// Size of the message struct in bytes (from introspection)
-    msg_size: usize,
-    /// Flat field layout — offsets and strides into msg_buf
-    fields: []const FlatField,
+    type_name: []const u8,
+    buf: *tb.MessageBuffer,
+    serialized_msg: c.rcutils_uint8_array_t,
 };
 
 fn initSubscription(
     allocator: std.mem.Allocator,
     node: *c.rcl_node_t,
-    cfg: TopicConfig,
-    buf: *tb.TopicBuffer,
-    fields: []const FlatField,
+    cfg: Config.TopicEntry,
+    buf: *tb.MessageBuffer,
     type_support: *const c.rosidl_message_type_support_t,
 ) !Subscription {
-    // Allocate and zero-init the message struct using the type support
-    // init_function — this is the same struct rcl_take will fill in
-    const intro_ts: *const c.rosidl_typesupport_introspection_c__MessageMembers =
-        @ptrCast(@alignCast(type_support.data));
-
-    const msg_size = intro_ts.size_of_;
-    const msg_buf = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(8), msg_size);
-    @memset(msg_buf, 0);
-
-    // Call the ROS-generated init function to set up any internal allocators
-    // (e.g. for dynamic arrays / strings inside the struct)
-    if (intro_ts.init_function) |init_fn| {
-        _ = init_fn(msg_buf.ptr, c.ROSIDL_RUNTIME_C_MSG_INIT_DEFAULTS_ONLY);
-    }
-
     var sub = c.rcl_get_zero_initialized_subscription();
     const opts = c.rcl_subscription_get_default_options();
 
@@ -90,85 +36,130 @@ fn initSubscription(
     const ret = c.rcl_subscription_init(&sub, node, type_support, topic_z.ptr, &opts);
     if (ret != c.RCL_RET_OK) return error.SubscriptionInitFailed;
 
+    // Initialize a reusable serialized message buffer
+    var serialized_msg = c.rcutils_get_zero_initialized_uint8_array();
+    const alloc_ret = c.rcutils_uint8_array_init(&serialized_msg, 0, &c.rcutils_get_default_allocator());
+    if (alloc_ret != c.RCUTILS_RET_OK) return error.SerializedMsgInitFailed;
+
     return .{
         .sub = sub,
         .topic_name = cfg.topic_name,
+        .type_name = cfg.type_name,
         .buf = buf,
-        .type_support = type_support,
-        .msg_buf = msg_buf,
-        .msg_size = msg_size,
-        .fields = fields,
+        .serialized_msg = serialized_msg,
     };
 }
 
 fn finiSubscription(sub: *Subscription, node: *c.rcl_node_t) void {
-    // Call fini_function to free any heap inside the message struct
-    const intro_ts: *const c.rosidl_typesupport_introspection_c__MessageMembers =
-        @ptrCast(@alignCast(sub.type_support.data));
-    if (intro_ts.fini_function) |fini_fn| {
-        _ = fini_fn(sub.msg_buf.ptr);
-    }
+    _ = c.rcutils_uint8_array_fini(&sub.serialized_msg);
     _ = c.rcl_subscription_fini(&sub.sub, node);
 }
 
 // ---------------------------------------------------------------------------
-// Startup
+// Type support loading via rosidl_typesupport_c
+// ---------------------------------------------------------------------------
+
+/// Load the generic type support for a ROS message type.
+/// type_name format: "package_name/msg/MessageType"
+fn loadTypeSupport(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+) !*const c.rosidl_message_type_support_t {
+    // Parse "pkg/msg/Type" into components
+    var parts = std.mem.splitScalar(u8, type_name, '/');
+    const pkg = parts.next() orelse return error.InvalidTypeName;
+    const msg_ns = parts.next() orelse return error.InvalidTypeName;
+    const msg_type = parts.next() orelse return error.InvalidTypeName;
+
+    _ = msg_ns; // always "msg"
+
+    // Build the type support function name:
+    // rosidl_typesupport_c__get_message_type_support_handle__<pkg>__msg__<type>
+    const func_name = try std.fmt.allocPrintSentinel(
+        allocator,
+        "rosidl_typesupport_c__get_message_type_support_handle__{s}__msg__{s}",
+        .{ pkg, msg_type },
+        0,
+    );
+
+    // Load the shared library containing the type support
+    const lib_name = try std.fmt.allocPrintSentinel(
+        allocator,
+        "lib{s}__rosidl_typesupport_c.so",
+        .{pkg},
+        0,
+    );
+
+    const handle = std.c.dlopen(lib_name.ptr, .{ .LAZY = true }) orelse
+        return error.TypeSupportLibNotFound;
+
+    const sym = std.c.dlsym(handle, func_name.ptr) orelse
+        return error.TypeSupportSymNotFound;
+
+    const get_ts: *const fn () callconv(.c) *const c.rosidl_message_type_support_t = @ptrCast(sym);
+    return get_ts();
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
 // ---------------------------------------------------------------------------
 
 pub const Pipeline = struct {
     arena: std.heap.ArenaAllocator,
     node: *c.rcl_node_t,
     subs: []Subscription,
-    buf_pool: TopicBufferPool,
-    ipc_pool: IpcWriterPool,
+    buf_pool: MessageBufferPool,
+    writer_pool: McapWriterPool,
     wait_set: c.rcl_wait_set_t,
-    out_dir: std.fs.Dir,
 
     pub fn init(
         backing: std.mem.Allocator,
         node: *c.rcl_node_t,
-        config_path: []const u8,
-        out_path: []const u8,
+        cfg: *const Config,
     ) !Pipeline {
         var arena = std.heap.ArenaAllocator.init(backing);
         const allocator = arena.allocator();
 
-        // 1. Parse config
-        const configs = try parseConfig(allocator, config_path);
+        const topics = cfg.topics;
 
-        // 2. Flatten schemas + load type supports
-        const specs = try allocator.alloc(TopicSpec, configs.len);
-        const ts_handles = try allocator.alloc(*const c.rosidl_message_type_support_t, configs.len);
+        // 1. Build topic specs and load type supports
+        const specs = try allocator.alloc(TopicSpec, topics.len);
+        const ts_handles = try allocator.alloc(*const c.rosidl_message_type_support_t, topics.len);
 
-        for (configs, 0..) |cfg, i| {
-            var fields: std.ArrayList(FlatField) = .empty;
-            // flattenMessageType now returns the type_support handle too
-            const ts = try schema.flattenMessageType(allocator, cfg.type_name.ptr, "", &fields);
-            ts_handles[i] = ts;
+        for (topics, 0..) |topic, i| {
+            ts_handles[i] = try loadTypeSupport(allocator, topic.type_name);
             specs[i] = .{
-                .name = cfg.topic_name,
-                .type_name = cfg.type_name,
-                .fields = try fields.toOwnedSlice(allocator),
+                .name = topic.topic_name,
+                .type_name = topic.type_name,
             };
         }
 
-        // 3. Init topic buffer pool
-        var buf_pool = try TopicBufferPool.init(allocator, specs);
+        // 2. Init message buffer pool
+        const write_buffer_bytes: usize = @as(usize, cfg.write_buffer_mb) * 1024 * 1024;
+        var buf_pool = try MessageBufferPool.init(allocator, specs, write_buffer_bytes);
 
-        // 4. Open output dir, init IPC writer pool
-        const out_dir = try std.fs.cwd().makeOpenPath(out_path, .{});
-        const ipc_pool = try IpcWriterPool.init(allocator, out_dir, &buf_pool);
+        // 3. Init MCAP writer pool
+        const max_duration_ns: u64 = @as(u64, cfg.max_bag_duration_s) * std.time.ns_per_s;
+        const max_size_bytes: u64 = @as(u64, cfg.max_bag_size_mb) * 1024 * 1024;
+        const writer_pool = try McapWriterPool.init(
+            allocator,
+            cfg.log_directory,
+            cfg.robot_id,
+            cfg.software_version,
+            &buf_pool,
+            max_duration_ns,
+            max_size_bytes,
+        );
 
-        // 5. Init subscriptions
-        const subs = try allocator.alloc(Subscription, configs.len);
-        for (configs, 0..) |cfg, i| {
-            const buf = buf_pool.get(cfg.topic_name) orelse return error.TopicBufferNotFound;
+        // 4. Init subscriptions
+        const subs = try allocator.alloc(Subscription, topics.len);
+        for (topics, 0..) |topic, i| {
+            const buf = buf_pool.get(topic.topic_name) orelse return error.TopicBufferNotFound;
             subs[i] = try initSubscription(
                 allocator,
                 node,
-                cfg,
+                topic,
                 buf,
-                specs[i].fields,
                 ts_handles[i],
             );
         }
@@ -195,22 +186,20 @@ pub const Pipeline = struct {
             .node = node,
             .subs = subs,
             .buf_pool = buf_pool,
-            .ipc_pool = ipc_pool,
+            .writer_pool = writer_pool,
             .wait_set = wait_set,
-            .out_dir = out_dir,
         };
     }
 
     pub fn deinit(self: *Pipeline) void {
-        // Final flush — drain any partial batches below the threshold
-        self.ipc_pool.forceFlushAll(&self.buf_pool) catch |err| {
+        // Final flush — drain any remaining messages
+        self.writer_pool.forceFlushAll(&self.buf_pool) catch |err| {
             std.debug.print("Warning: final flush failed: {}\n", .{err});
         };
         for (self.subs) |*sub| finiSubscription(sub, self.node);
         _ = c.rcl_wait_set_fini(&self.wait_set);
-        self.ipc_pool.finish();
+        self.writer_pool.finish();
         self.buf_pool.deinit();
-        self.out_dir.close();
         self.arena.deinit();
     }
 
@@ -231,7 +220,8 @@ pub const Pipeline = struct {
             // Block with 100ms timeout so we flush on quiet topics
             const ret = c.rcl_wait(&self.wait_set, 100 * std.time.ns_per_ms);
             if (ret == c.RCL_RET_TIMEOUT) {
-                try self.ipc_pool.flushAll(&self.buf_pool);
+                try self.writer_pool.flushAll(&self.buf_pool);
+                _ = try self.writer_pool.rotateIfNeeded();
                 continue;
             }
             if (ret != c.RCL_RET_OK) return error.WaitFailed;
@@ -239,43 +229,46 @@ pub const Pipeline = struct {
             // Receive from each ready subscription
             for (self.subs, 0..) |*sub, i| {
                 if (self.wait_set.subscriptions[i] == null) continue;
-                try self.receiveOne(sub);
+                self.receiveOne(sub);
             }
 
             // Flush topics that have hit the message threshold
-            try self.ipc_pool.flushAll(&self.buf_pool);
+            try self.writer_pool.flushAll(&self.buf_pool);
+
+            // Check if file rotation is needed (duration or size limit)
+            _ = try self.writer_pool.rotateIfNeeded();
         }
     }
 
-    fn receiveOne(self: *Pipeline, sub: *Subscription) !void {
+    fn receiveOne(self: *Pipeline, sub: *Subscription) void {
         _ = self;
         var msg_info: c.rmw_message_info_t = undefined;
 
-        // rcl_take fills sub.msg_buf in-place — the C struct is already
-        // allocated and init'd, rcl just overwrites its fields
-        const ret = c.rcl_take(&sub.sub, sub.msg_buf.ptr, &msg_info, null);
+        const ret = c.rcl_take_serialized_message(
+            &sub.sub,
+            &sub.serialized_msg,
+            &msg_info,
+            null,
+        );
         if (ret == c.RCL_RET_SUBSCRIPTION_TAKE_FAILED) return;
-        if (ret != c.RCL_RET_OK) return error.TakeFailed;
-
-        // Extract each flat field by offset directly from the C struct bytes
-        for (sub.fields) |field| {
-            const start = field.offset;
-            const end = start + field.stride();
-            if (end > sub.msg_buf.len) {
-                std.debug.print("Warning: field '{s}' offset out of bounds, skipping\n", .{field.name});
-                continue;
-            }
-            try sub.buf.columns[fieldIndex(sub, field)].push(sub.msg_buf[start..end]);
+        if (ret != c.RCL_RET_OK) {
+            std.debug.print("Warning: rcl_take_serialized_message failed for {s}\n", .{sub.topic_name});
+            return;
         }
-        sub.buf.message_count += 1;
+
+        // Use source_timestamp from the publisher; fall back to received_timestamp
+        // if the DDS implementation didn't fill it.
+        const timestamp_ns: u64 = if (msg_info.source_timestamp > 0)
+            @intCast(msg_info.source_timestamp)
+        else if (msg_info.received_timestamp > 0)
+            @intCast(msg_info.received_timestamp)
+        else
+            @intCast(std.time.nanoTimestamp());
+
+        // Copy the serialized bytes into the message buffer
+        const data = sub.serialized_msg.buffer[0..sub.serialized_msg.buffer_length];
+        sub.buf.push(data, timestamp_ns) catch |err| {
+            std.debug.print("Warning: buffer push failed for {s}: {}\n", .{ sub.topic_name, err });
+        };
     }
 };
-
-/// Returns the column index for a field — fields and columns are built in the
-/// same order from the same FlatField slice so this is a direct index lookup.
-fn fieldIndex(sub: *const Subscription, field: FlatField) usize {
-    for (sub.fields, 0..) |f, i| {
-        if (f.offset == field.offset) return i;
-    }
-    unreachable; // field must exist — same slice
-}

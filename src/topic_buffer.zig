@@ -1,112 +1,125 @@
 const std = @import("std");
-const schema = @import("schema.zig");
-const cb = @import("column_buffer.zig");
 
-const FlatField = schema.FlatField;
-const ColumnBuffer = cb.ColumnBuffer;
-const FLUSH_THRESHOLD = cb.FLUSH_THRESHOLD;
+const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024; // 8 MB per topic
 
-pub const TopicBuffer = struct {
+pub const TimestampedMessage = struct {
+    data: []u8,
+    timestamp_ns: u64,
+};
+
+pub const MessageBuffer = struct {
     topic_name: []const u8,
     type_name: []const u8,
-    columns: []ColumnBuffer,
-    /// Incremented on every push, reset on every flush
-    message_count: usize,
+    messages: std.ArrayList(TimestampedMessage),
+    total_bytes: usize,
+    max_bytes: usize,
+    drop_count: u64,
+    allocator: std.mem.Allocator,
 
     pub fn init(
         allocator: std.mem.Allocator,
         topic_name: []const u8,
         type_name: []const u8,
-        fields: []const FlatField,
-    ) !TopicBuffer {
-        const cols = try allocator.alloc(ColumnBuffer, fields.len);
-        for (fields, 0..) |field, i| {
-            cols[i] = ColumnBuffer.init(field);
-        }
+        max_bytes: usize,
+    ) MessageBuffer {
         return .{
             .topic_name = topic_name,
             .type_name = type_name,
-            .columns = cols,
-            .message_count = 0,
+            .messages = .empty,
+            .total_bytes = 0,
+            .max_bytes = max_bytes,
+            .drop_count = 0,
+            .allocator = allocator,
         };
     }
 
-    /// Push one full message - values must be in the same order as columns.
-    /// Each value slice is the raw bytes for that field.
-    pub fn push(self: *TopicBuffer, values: []const []const u8) !void {
-        std.debug.assert(values.len == self.columns.len);
-        for (self.columns, values) |*col, val| {
-            try col.push(val);
+    /// Push a copy of the serialized message bytes into the buffer.
+    /// If the buffer exceeds max_bytes, drops the oldest message.
+    pub fn push(self: *MessageBuffer, serialized_bytes: []const u8, timestamp_ns: u64) !void {
+        const copy = try self.allocator.dupe(u8, serialized_bytes);
+        try self.messages.append(self.allocator, .{ .data = copy, .timestamp_ns = timestamp_ns });
+        self.total_bytes += copy.len;
+
+        // Drop oldest messages while over budget
+        while (self.total_bytes > self.max_bytes and self.messages.items.len > 1) {
+            const oldest = self.messages.orderedRemove(0);
+            self.total_bytes -= oldest.data.len;
+            self.allocator.free(oldest.data);
+            self.drop_count += 1;
         }
-        self.message_count += 1;
     }
 
-    pub fn needsFlush(self: *const TopicBuffer) bool {
-        return self.message_count >= FLUSH_THRESHOLD;
+    /// Return all buffered messages and reset the buffer.
+    /// After drainAll, the caller owns the returned slice and all message slices.
+    pub fn drainAll(self: *MessageBuffer) []TimestampedMessage {
+        const items = self.messages.toOwnedSlice(self.allocator) catch {
+            // On OOM for the owned slice, just return empty — messages stay buffered
+            return &.{};
+        };
+        self.total_bytes = 0;
+        return items;
     }
 
-    /// Drain all columns into a flat per-column byte slice array.
-    /// Caller provides a pre-allocated [][]u8 with one entry per column,
-    /// each large enough to hold FLUSH_THRESHOLD * stride bytes.
-    /// Returns the number of elements drained (same for all columns).
-    pub fn drain(self: *TopicBuffer, dest: [][]u8) !usize {
-        std.debug.assert(dest.len == self.columns.len);
-        var n: usize = 0;
-        for (self.columns, dest) |*col, dest_col| {
-            n = try col.drain(dest_col);
+    pub fn len(self: *const MessageBuffer) usize {
+        return self.messages.items.len;
+    }
+
+    pub fn needsFlush(self: *const MessageBuffer) bool {
+        return self.messages.items.len > 0;
+    }
+
+    pub fn deinit(self: *MessageBuffer) void {
+        for (self.messages.items) |msg| {
+            self.allocator.free(msg.data);
         }
-        self.message_count = 0;
-        return n;
-    }
-
-    pub fn len(self: *const TopicBuffer) usize {
-        return self.message_count;
+        self.messages.deinit(self.allocator);
     }
 };
 
-/// A pool of TopicBuffers, one per subscribed topic.
-/// Owns all allocations via an arena — single deinit at shutdown.
-pub const TopicBufferPool = struct {
+/// Descriptor for a topic to subscribe to.
+pub const TopicSpec = struct {
+    name: []const u8,
+    type_name: []const u8,
+};
+
+/// A pool of MessageBuffers, one per subscribed topic.
+pub const MessageBufferPool = struct {
     arena: std.heap.ArenaAllocator,
-    buffers: []TopicBuffer,
+    buffers: []MessageBuffer,
 
     pub fn init(
         backing: std.mem.Allocator,
         topics: []const TopicSpec,
-    ) !TopicBufferPool {
+        max_bytes_per_topic: usize,
+    ) !MessageBufferPool {
         var arena = std.heap.ArenaAllocator.init(backing);
         const allocator = arena.allocator();
 
-        const buffers = try allocator.alloc(TopicBuffer, topics.len);
+        const buffers = try allocator.alloc(MessageBuffer, topics.len);
         for (topics, 0..) |topic, i| {
-            buffers[i] = try TopicBuffer.init(
+            buffers[i] = MessageBuffer.init(
                 allocator,
                 topic.name,
                 topic.type_name,
-                topic.fields,
+                max_bytes_per_topic,
             );
         }
 
         return .{ .arena = arena, .buffers = buffers };
     }
 
-    pub fn deinit(self: *TopicBufferPool) void {
+    pub fn deinit(self: *MessageBufferPool) void {
+        for (self.buffers) |*buf| {
+            buf.deinit();
+        }
         self.arena.deinit();
     }
 
     /// Find a buffer by topic name. O(n) — fine for typical topic counts (<100).
-    // FIXME: replace with std.StringHashMap(*TopicBuffer) for better scaling
-    pub fn get(self: *TopicBufferPool, topic_name: []const u8) ?*TopicBuffer {
+    pub fn get(self: *MessageBufferPool, topic_name: []const u8) ?*MessageBuffer {
         for (self.buffers) |*buf| {
             if (std.mem.eql(u8, buf.topic_name, topic_name)) return buf;
         }
         return null;
     }
-};
-
-/// Fully resolved topic descriptor, produced by the startup pipeline
-pub const TopicSpec = struct {
-    name: []const u8,
-    type_name: []const u8,
-    fields: []const FlatField,
 };
