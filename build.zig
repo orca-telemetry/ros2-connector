@@ -3,58 +3,30 @@ const std = @import("std");
 const test_targets = [_]std.Target.Query{
     .{}, // native host
 };
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
 
-    // --- 1. Define Dependencies (nanoarrow) ------------------------------------
-    const nanoarrow_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
-    const nanoarrow_lib = b.addLibrary(.{
-        .name = "nanoarrow",
-        .root_module = nanoarrow_mod,
-        .linkage = .static,
-    });
-
-    nanoarrow_lib.addCSourceFiles(.{
-        .files = &.{
-            "vendor/nanoarrow/nanoarrow.c",
-            "vendor/nanoarrow/flatcc.c",
-            "vendor/nanoarrow/nanoarrow_ipc.c",
-            "vendor/nanoarrow/arrow_helpers.c",
-        },
-        .flags = &.{"-std=c11"},
-    });
-    nanoarrow_lib.addIncludePath(b.path("vendor/nanoarrow"));
-
-    // --- 2. Configure the Main Module ------------------------------------------
-    const main_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
-    // Link nanoarrow to the main module
-    main_mod.addIncludePath(b.path("vendor/nanoarrow"));
-
-    // --- ROS 2 Configuration ---
-    const ros_root = b.option(
-        []const u8,
-        "ros-root",
-        "ROS 2 install root (default: /opt/ros/jazzy)",
-    ) orelse "/opt/ros/jazzy";
-
-    const ros_include = b.fmt("{s}/include", .{ros_root});
+    // --- ROS dependencies - linked system library ------------------------------------
+    // gets added in directly to the exe as a linked system library
+    const ros_root = b.option([]const u8, "ros_root", "location to the ros Library") orelse "/opt/ros/jazzy";
+    const ros_include_path = b.fmt("{s}/include", .{ros_root});
     const ros_lib_path = b.fmt("{s}/lib", .{ros_root});
 
-    main_mod.addIncludePath(.{ .cwd_relative = ros_include });
-    main_mod.addLibraryPath(.{ .cwd_relative = ros_lib_path });
+    // --- Main executable ----------------------------------------------------------
+    const exe = b.addExecutable(.{
+        .name = "ros_observer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    // link ros
+    exe.root_module.addIncludePath(.{ .cwd_relative = ros_include_path });
+    exe.root_module.addLibraryPath(.{ .cwd_relative = ros_lib_path });
 
     const ros_pkgs = [_][]const u8{
         "rcl",
@@ -70,7 +42,7 @@ pub fn build(b: *std.Build) void {
         "rosidl_typesupport_introspection_c",
     };
     inline for (ros_pkgs) |pkg| {
-        main_mod.addIncludePath(.{ .cwd_relative = pkg });
+        exe.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ ros_root, pkg }) });
     }
 
     const ros_libs = [_][]const u8{
@@ -84,35 +56,28 @@ pub fn build(b: *std.Build) void {
         "rosidl_typesupport_introspection_c",
         "dl",
     };
-    inline for (ros_libs) |lib| {
-        main_mod.linkSystemLibrary(lib, .{});
+    inline for (ros_libs) |pkg| {
+        exe.root_module.addIncludePath(.{ .cwd_relative = pkg });
     }
 
-    // --- 3. Main Executable ----------------------------------------------------
-    const exe = b.addExecutable(.{
-        .name = "ros_observer",
-        .root_module = main_mod,
-    });
-    exe.linkLibrary(nanoarrow_lib);
     b.installArtifact(exe);
 
-    // --- 4. The "Check" Step (For ZLS Diagnostics) -----------------------------
+    // --- Check Step (For ZLS Diagnostics) -----------------------------
     const check_step = b.step("check", "Check if the code compiles");
 
     const exe_check = b.addExecutable(.{
         .name = "check_exe",
-        .root_module = main_mod,
+        .root_module = exe.root_module,
     });
-    exe_check.linkLibrary(nanoarrow_lib);
     check_step.dependOn(&exe_check.step);
 
-    // --- 5. Run Command --------------------------------------------------------
+    // --- Run Command --------------------------------------------------------
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the app").dependOn(&run_cmd.step);
 
-    // --- 6. Test Step ----------------------------------------------------------
+    // --- Test Step ----------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |tgt| {
         // We create a specific module for tests to ensure they are built
@@ -124,12 +89,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
 
-        // Re-apply the same dependency logic to the test module
+        // re-apply the same dependency logic to the test module
         test_mod.addIncludePath(b.path("vendor/nanoarrow"));
-        test_mod.addIncludePath(.{ .cwd_relative = ros_include });
+        test_mod.addIncludePath(.{ .cwd_relative = ros_include_path });
         test_mod.addLibraryPath(.{ .cwd_relative = ros_lib_path });
         inline for (ros_pkgs) |pkg| {
-            test_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ ros_root, pkg }) });
+            test_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ "/op", pkg }) });
         }
         inline for (ros_libs) |lib| {
             test_mod.linkSystemLibrary(lib, .{});
@@ -138,7 +103,6 @@ pub fn build(b: *std.Build) void {
         const unit_tests = b.addTest(.{
             .root_module = test_mod,
         });
-        unit_tests.linkLibrary(nanoarrow_lib);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         test_step.dependOn(&run_unit_tests.step);

@@ -5,7 +5,7 @@ pub const c = @cImport({
     @cInclude("rosidl_typesupport_introspection_c/message_introspection.h");
     @cInclude("rosidl_runtime_c/message_type_support_struct.h");
     @cInclude("dlfcn.h");
-    @cInclude("nanoarrow.h");
-    @cInclude("nanoarrow_ipc.h");
-    @cInclude("arrow_helpers.h");
+    // @cInclude("nanoarrow.h");
+    // @cInclude("nanoarrow_ipc.h");
+    // @cInclude("arrow_helpers.h");
 });
