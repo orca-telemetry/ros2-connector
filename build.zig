@@ -6,7 +6,7 @@ const test_targets = [_]std.Target.Query{
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
 
     // --- 1. Define Dependencies (nanoarrow) ------------------------------------
     const nanoarrow_mod = b.createModule(.{
@@ -33,7 +33,6 @@ pub fn build(b: *std.Build) void {
     nanoarrow_lib.addIncludePath(b.path("vendor/nanoarrow"));
 
     // --- 2. Configure the Main Module ------------------------------------------
-    // This module represents your source code logic and its requirements.
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -56,7 +55,6 @@ pub fn build(b: *std.Build) void {
 
     main_mod.addIncludePath(.{ .cwd_relative = ros_include });
     main_mod.addLibraryPath(.{ .cwd_relative = ros_lib_path });
-    main_mod.addRPath(.{ .cwd_relative = ros_lib_path });
 
     const ros_pkgs = [_][]const u8{
         "rcl",
@@ -72,7 +70,7 @@ pub fn build(b: *std.Build) void {
         "rosidl_typesupport_introspection_c",
     };
     inline for (ros_pkgs) |pkg| {
-        main_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ ros_root, pkg }) });
+        main_mod.addIncludePath(.{ .cwd_relative = pkg });
     }
 
     const ros_libs = [_][]const u8{
@@ -99,7 +97,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // --- 4. The "Check" Step (For ZLS Diagnostics) -----------------------------
-    // This is what makes Neovim show errors on save.
     const check_step = b.step("check", "Check if the code compiles");
 
     const exe_check = b.addExecutable(.{
@@ -146,7 +143,6 @@ pub fn build(b: *std.Build) void {
         const run_unit_tests = b.addRunArtifact(unit_tests);
         test_step.dependOn(&run_unit_tests.step);
 
-        // Also add the tests to the 'check' step so ZLS reports test errors!
         check_step.dependOn(&unit_tests.step);
     }
 }
