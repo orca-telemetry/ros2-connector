@@ -3,11 +3,12 @@ const std = @import("std");
 const test_targets = [_]std.Target.Query{
     .{}, // native host
 };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
 
-    // --- ROS dependencies - linked system library ------------------------------------
+    // --- ROS dependencies - linked library ------------------------------------
     // gets added in directly to the exe as a linked system library
     const ros_root = b.option([]const u8, "ros_root", "location to the ros Library") orelse "/opt/ros/jazzy";
     const ros_include_path = b.fmt("{s}/include", .{ros_root});
@@ -23,6 +24,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    exe.root_module.addIncludePath(b.path("vendor/mcap/include"));
 
     // link ros
     exe.root_module.addIncludePath(.{ .cwd_relative = ros_include_path });
@@ -41,9 +43,6 @@ pub fn build(b: *std.Build) void {
         "rosidl_dynamic_typesupport",
         "rosidl_typesupport_introspection_c",
     };
-    inline for (ros_pkgs) |pkg| {
-        exe.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ ros_root, pkg }) });
-    }
 
     const ros_libs = [_][]const u8{
         "rcl",
@@ -56,8 +55,12 @@ pub fn build(b: *std.Build) void {
         "rosidl_typesupport_introspection_c",
         "dl",
     };
+
     inline for (ros_libs) |pkg| {
         exe.root_module.addIncludePath(.{ .cwd_relative = pkg });
+    }
+    inline for (ros_pkgs) |pkg| {
+        exe.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ ros_root, pkg }) });
     }
 
     b.installArtifact(exe);
@@ -71,16 +74,16 @@ pub fn build(b: *std.Build) void {
     });
     check_step.dependOn(&exe_check.step);
 
-    // --- Run Command --------------------------------------------------------
+    // --- run command --------------------------------------------------------
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the app").dependOn(&run_cmd.step);
 
-    // --- Test Step ----------------------------------------------------------
+    // --- test step ----------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |tgt| {
-        // We create a specific module for tests to ensure they are built
+        // we create a specific module for tests to ensure they are built
         // with the 'test' flag enabled and correctly resolved targets.
         const test_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -90,14 +93,14 @@ pub fn build(b: *std.Build) void {
         });
 
         // re-apply the same dependency logic to the test module
-        test_mod.addIncludePath(b.path("vendor/nanoarrow"));
         test_mod.addIncludePath(.{ .cwd_relative = ros_include_path });
         test_mod.addLibraryPath(.{ .cwd_relative = ros_lib_path });
+
         inline for (ros_pkgs) |pkg| {
             test_mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include/{s}", .{ "/op", pkg }) });
         }
         inline for (ros_libs) |lib| {
-            test_mod.linkSystemLibrary(lib, .{});
+            test_mod.addIncludePath(.{ .cwd_relative = lib });
         }
 
         const unit_tests = b.addTest(.{

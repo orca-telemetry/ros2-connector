@@ -2,12 +2,12 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const schema = @import("schema.zig");
 const tb = @import("topic_buffer.zig");
-const ipc = @import("ipc_writer.zig");
+const mcap = @import("mcap_writer.zig");
 
 const FlatField = schema.FlatField;
 const TopicSpec = tb.TopicSpec;
 const TopicBufferPool = tb.TopicBufferPool;
-const IpcWriterPool = ipc.IpcWriterPool;
+const IpcWriterPool = mcap.IpcWriterPool;
 
 // ---------------------------------------------------------------------------
 // Config parsing
