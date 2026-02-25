@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const tb = @import("topic_buffer.zig");
 const mcap = @import("mcap_writer.zig");
+const storage = @import("storage.zig");
+const status = @import("status.zig");
 const Config = @import("config.zig").Config;
 
 const TopicSpec = tb.TopicSpec;
@@ -111,6 +113,10 @@ pub const Pipeline = struct {
     buf_pool: MessageBufferPool,
     writer_pool: McapWriterPool,
     wait_set: c.rcl_wait_set_t,
+    log_dir_z: [*:0]const u8,
+    disk_usage_limit_pct: u32,
+    min_free_disk_mb: u32,
+    status_reporter: status.StatusReporter,
 
     pub fn init(
         backing: std.mem.Allocator,
@@ -141,6 +147,7 @@ pub const Pipeline = struct {
         // 3. Init MCAP writer pool
         const max_duration_ns: u64 = @as(u64, cfg.max_bag_duration_s) * std.time.ns_per_s;
         const max_size_bytes: u64 = @as(u64, cfg.max_bag_size_mb) * 1024 * 1024;
+        const fsync_interval_ns: u64 = @as(u64, cfg.fsync_interval_s) * std.time.ns_per_s;
         const writer_pool = try McapWriterPool.init(
             allocator,
             cfg.log_directory,
@@ -149,6 +156,7 @@ pub const Pipeline = struct {
             &buf_pool,
             max_duration_ns,
             max_size_bytes,
+            fsync_interval_ns,
         );
 
         // 4. Init subscriptions
@@ -181,6 +189,15 @@ pub const Pipeline = struct {
         );
         if (ret != c.RCL_RET_OK) return error.WaitSetInitFailed;
 
+        const log_dir_z = try allocator.dupeZ(u8, cfg.log_directory);
+
+        const status_reporter = status.StatusReporter.init(
+            allocator,
+            cfg.software_version,
+            log_dir_z.ptr,
+            cfg.status_interval_s,
+        );
+
         return .{
             .arena = arena,
             .node = node,
@@ -188,6 +205,10 @@ pub const Pipeline = struct {
             .buf_pool = buf_pool,
             .writer_pool = writer_pool,
             .wait_set = wait_set,
+            .log_dir_z = log_dir_z.ptr,
+            .disk_usage_limit_pct = cfg.disk_usage_limit_pct,
+            .min_free_disk_mb = cfg.min_free_disk_mb,
+            .status_reporter = status_reporter,
         };
     }
 
@@ -221,7 +242,9 @@ pub const Pipeline = struct {
             const ret = c.rcl_wait(&self.wait_set, 100 * std.time.ns_per_ms);
             if (ret == c.RCL_RET_TIMEOUT) {
                 try self.writer_pool.flushAll(&self.buf_pool);
-                _ = try self.writer_pool.rotateIfNeeded();
+                self.maybeRotate();
+                self.writer_pool.periodicFsync();
+                self.status_reporter.maybeSend(&self.writer_pool, &self.buf_pool);
                 continue;
             }
             if (ret != c.RCL_RET_OK) return error.WaitFailed;
@@ -236,7 +259,41 @@ pub const Pipeline = struct {
             try self.writer_pool.flushAll(&self.buf_pool);
 
             // Check if file rotation is needed (duration or size limit)
-            _ = try self.writer_pool.rotateIfNeeded();
+            self.maybeRotate();
+            self.writer_pool.periodicFsync();
+            self.status_reporter.maybeSend(&self.writer_pool, &self.buf_pool);
+        }
+    }
+
+    fn maybeRotate(self: *Pipeline) void {
+        if (!self.writer_pool.shouldRotate()) return;
+
+        // Capture bytes from the completed file before rotation resets the counter
+        const old_bytes = self.writer_pool.bytes_written;
+        const old_path = self.writer_pool.file_path;
+
+        self.writer_pool.rotate() catch |err| {
+            std.log.err("File rotation failed: {}", .{err});
+            return;
+        };
+        std.log.info("Rotated MCAP file: {s} -> {s}", .{ old_path, self.writer_pool.file_path });
+
+        self.status_reporter.addBytesWritten(old_bytes);
+        self.runCleanup();
+    }
+
+    fn runCleanup(self: *Pipeline) void {
+        const deleted = storage.cleanupOldFiles(
+            self.arena.allocator(),
+            self.log_dir_z,
+            self.disk_usage_limit_pct,
+            self.min_free_disk_mb,
+        ) catch |err| {
+            std.log.err("Disk cleanup failed: {}", .{err});
+            return;
+        };
+        if (deleted > 0) {
+            std.log.info("Disk cleanup: deleted {} old recording(s)", .{deleted});
         }
     }
 

@@ -14,6 +14,8 @@ pub const MessageBuffer = struct {
     total_bytes: usize,
     max_bytes: usize,
     drop_count: u64,
+    messages_received: u64,
+    bytes_received: u64,
     allocator: std.mem.Allocator,
 
     pub fn init(
@@ -29,6 +31,8 @@ pub const MessageBuffer = struct {
             .total_bytes = 0,
             .max_bytes = max_bytes,
             .drop_count = 0,
+            .messages_received = 0,
+            .bytes_received = 0,
             .allocator = allocator,
         };
     }
@@ -36,6 +40,9 @@ pub const MessageBuffer = struct {
     /// Push a copy of the serialized message bytes into the buffer.
     /// If the buffer exceeds max_bytes, drops the oldest message.
     pub fn push(self: *MessageBuffer, serialized_bytes: []const u8, timestamp_ns: u64) !void {
+        self.messages_received += 1;
+        self.bytes_received += serialized_bytes.len;
+
         const copy = try self.allocator.dupe(u8, serialized_bytes);
         try self.messages.append(self.allocator, .{ .data = copy, .timestamp_ns = timestamp_ns });
         self.total_bytes += copy.len;

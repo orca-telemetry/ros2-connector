@@ -35,6 +35,9 @@ fn installSignalHandlers() void {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
+    const dir = try std.fs.openDirAbsolute("/", .{});
+    _ = try dir.stat();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();

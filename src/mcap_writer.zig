@@ -133,8 +133,10 @@ pub const McapWriterPool = struct {
     software_version: []const u8,
     max_duration_ns: u64,
     max_size_bytes: u64,
+    fsync_interval_ns: u64,
     bytes_written: u64,
     open_time_ns: u64,
+    last_fsync_ns: u64,
     sequence: u32,
 
     pub fn init(
@@ -145,6 +147,7 @@ pub const McapWriterPool = struct {
         buf_pool: *tb.MessageBufferPool,
         max_duration_ns: u64,
         max_size_bytes: u64,
+        fsync_interval_ns: u64,
     ) !McapWriterPool {
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
 
@@ -179,8 +182,10 @@ pub const McapWriterPool = struct {
             .software_version = software_version,
             .max_duration_ns = max_duration_ns,
             .max_size_bytes = max_size_bytes,
+            .fsync_interval_ns = fsync_interval_ns,
             .bytes_written = 0,
             .open_time_ns = now_ns,
+            .last_fsync_ns = now_ns,
             .sequence = 0,
         };
     }
@@ -251,6 +256,7 @@ pub const McapWriterPool = struct {
         self.incomplete_path = new_incomplete;
         self.bytes_written = 0;
         self.open_time_ns = now_ns;
+        self.last_fsync_ns = now_ns;
     }
 
     /// Check and rotate if needed. Returns true if a rotation occurred.
@@ -262,6 +268,25 @@ pub const McapWriterPool = struct {
             return true;
         }
         return false;
+    }
+
+    /// Fsync the current .incomplete file if the configured interval has elapsed.
+    pub fn periodicFsync(self: *McapWriterPool) void {
+        if (self.fsync_interval_ns == 0) return;
+
+        const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+        if (now_ns - self.last_fsync_ns < self.fsync_interval_ns) return;
+
+        if (std.fs.cwd().openFileZ(self.incomplete_path, .{})) |file| {
+            file.sync() catch |err| {
+                std.log.err("periodic fsync failed for {s}: {}", .{ self.incomplete_path, err });
+            };
+            file.close();
+        } else |err| {
+            std.log.err("periodic fsync: failed to open {s}: {}", .{ self.incomplete_path, err });
+        }
+
+        self.last_fsync_ns = now_ns;
     }
 
     /// Close the MCAP file, fsync, rename, and write checksum.

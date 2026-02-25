@@ -6,7 +6,7 @@ const test_targets = [_]std.Target.Query{
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
 
     // --- ROS dependencies - linked library ------------------------------------
     const ros_root = b.option([]const u8, "ros_root", "location to the ros Library") orelse "/opt/ros/jazzy";
