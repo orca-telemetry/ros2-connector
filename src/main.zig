@@ -100,15 +100,21 @@ pub fn main() !void {
 
         try discovery.runDiscovery(allocator, &node);
     } else if (std.mem.eql(u8, command, "listen")) {
-        if (args.len < 3) {
-            std.debug.print("Error: listen requires a config file path\n", .{});
-            std.debug.print("Usage: orca listen <config.json>\n", .{});
+        // --- Load and validate config from ~/.orca/config.json ---
+        const storage_path = config.ConfigStorage.getStoragePath(allocator) catch |err| {
+            std.debug.print("Error: cannot determine config directory: {}\n", .{err});
             return;
-        }
+        };
+        defer allocator.free(storage_path);
 
-        // --- Load and validate config ---
-        const parsed = cfg_mod.load(allocator, args[2]) catch |err| {
-            std.debug.print("Error: failed to load config '{s}': {}\n", .{ args[2], err });
+        const config_path = std.fs.path.join(allocator, &.{ storage_path, "config.json" }) catch |err| {
+            std.debug.print("Error: cannot build config path: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(config_path);
+
+        const parsed = cfg_mod.load(allocator, config_path) catch |err| {
+            std.debug.print("Error: failed to load config '{s}': {}\n", .{ config_path, err });
             return;
         };
         defer parsed.deinit();
@@ -142,7 +148,7 @@ pub fn main() !void {
         if (ret != c.RCL_RET_OK) return error.RclNodeInitFailed;
         defer _ = c.rcl_node_fini(&node);
 
-        std.debug.print("Node initialised. Loading config from '{s}'...\n", .{args[2]});
+        std.debug.print("Node initialised. Loading config from '{s}'...\n", .{config_path});
 
         // --- Pipeline init ---
         var pipeline = try Pipeline.init(allocator, &node, &cfg);
@@ -242,7 +248,7 @@ fn printUsage() void {
         \\Commands:
         \\  provision --token <T>   Generate keys and register with Orca
         \\  discover                Scan ROS 2 network and emit schema to Orca
-        \\  listen <config.json>    Listen to ROS 2 topics and save data to .mcap files
+        \\  listen                  Listen to ROS 2 topics and save data to .mcap files
         \\  sync                    Sync local robot config with Orca cloud
         \\
     , .{});

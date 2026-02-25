@@ -7,6 +7,7 @@ const test_targets = [_]std.Target.Query{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    const is_release = optimize != .Debug;
 
     // --- ROS dependencies - linked library ------------------------------------
     const ros_root = b.option([]const u8, "ros_root", "location to the ros Library") orelse "/opt/ros/jazzy";
@@ -15,14 +16,22 @@ pub fn build(b: *std.Build) void {
 
     // --- MCAP C++ bridge (compiled with system g++ to match libstdc++ ABI) ----
     const compile_bridge = b.addSystemCommand(&.{
-        "g++", "-shared",                                     "-fPIC", "-O2",
-        "-I",  b.fmt("{s}/include/mcap_vendor", .{ros_root}), "-L",    ros_lib_path,
-        "-o",
+        "g++", "-shared", "-fPIC",
     });
+    if (is_release) {
+        compile_bridge.addArgs(&.{ "-Os", "-ffunction-sections", "-fdata-sections" });
+    } else {
+        compile_bridge.addArg("-O2");
+    }
+    compile_bridge.addArgs(&.{ "-I", b.fmt("{s}/include/mcap_vendor", .{ros_root}), "-L", ros_lib_path, "-o" });
     const bridge_so = compile_bridge.addOutputFileArg("libmcap_bridge.so");
     compile_bridge.addFileArg(b.path("src/mcap_bridge.cpp"));
     compile_bridge.addArg("-lmcap");
     compile_bridge.addArg(b.fmt("-Wl,-rpath,{s}", .{ros_lib_path}));
+    if (is_release) {
+        compile_bridge.addArg("-Wl,--gc-sections");
+        compile_bridge.addArg("-s");
+    }
 
     // Install bridge .so alongside the binary
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(
@@ -41,6 +50,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    // Strip debug info in release builds for smaller binary
+    if (is_release) {
+        exe.root_module.strip = true;
+    }
 
     // ROS include paths
     exe.root_module.addIncludePath(.{ .cwd_relative = ros_include_path });
