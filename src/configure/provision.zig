@@ -109,7 +109,10 @@ fn uploadPublicKey(allocator: std.mem.Allocator, dir: std.fs.Dir, token: []const
 
     const robot_id_file = try dir.createFile(config.ConfigStorage.robot_config_file, .{});
     defer robot_id_file.close();
-    try robot_id_file.writeAll(parsed.value.robotId);
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try writer.writer.print("{f}", .{std.json.fmt(config.RobotConfig{ .id = @constCast(parsed.value.robotId) }, .{})});
+    try robot_id_file.writeAll(writer.written());
 
     std.debug.print("Successfully provisioned robot: {s}\n", .{parsed.value.robotId});
 }
