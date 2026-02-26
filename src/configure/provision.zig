@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("../config.zig");
 const constants = @import("constants.zig");
 const crypto = std.crypto;
 const http = std.http;

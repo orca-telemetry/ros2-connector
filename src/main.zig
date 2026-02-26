@@ -3,9 +3,9 @@ const c = @import("c.zig").c;
 const Pipeline = @import("pipeline.zig").Pipeline;
 const mcap = @import("mcap_writer.zig");
 const cfg_mod = @import("config.zig");
-const config = @import("configure/config.zig");
 const provision = @import("configure/provision.zig");
 const discovery = @import("configure/discovery.zig");
+const sync = @import("configure/sync.zig");
 
 extern "C" fn mcap_recover(src: [*:0]const u8, dst: [*:0]const u8) c_int;
 
@@ -99,15 +99,17 @@ pub fn main() !void {
         std.Thread.sleep(2 * std.time.ns_per_s);
 
         try discovery.runDiscovery(allocator, &node);
+    } else if (std.mem.eql(u8, command, "sync")) {
+        try sync.syncConfig(allocator);
     } else if (std.mem.eql(u8, command, "listen")) {
-        // --- Load and validate config from ~/.orca/config.json ---
-        const storage_path = config.ConfigStorage.getStoragePath(allocator) catch |err| {
+        // --- Load and validate collector config from ~/.orca/collector.json ---
+        const storage_path = cfg_mod.ConfigStorage.getStoragePath(allocator) catch |err| {
             std.debug.print("Error: cannot determine config directory: {}\n", .{err});
             return;
         };
         defer allocator.free(storage_path);
 
-        const config_path = std.fs.path.join(allocator, &.{ storage_path, "config.json" }) catch |err| {
+        const config_path = std.fs.path.join(allocator, &.{ storage_path, cfg_mod.ConfigStorage.collector_config_file }) catch |err| {
             std.debug.print("Error: cannot build config path: {}\n", .{err});
             return;
         };
@@ -248,8 +250,8 @@ fn printUsage() void {
         \\Commands:
         \\  provision --token <T>   Generate keys and register with Orca
         \\  discover                Scan ROS 2 network and emit schema to Orca
-        \\  listen                  Listen to ROS 2 topics and save data to .mcap files
         \\  sync                    Sync local robot config with Orca cloud
+        \\  listen                  Listen to ROS 2 topics and save data to .mcap files
         \\
     , .{});
 }

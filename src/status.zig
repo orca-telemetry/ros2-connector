@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("configure/config.zig");
+const config = @import("config.zig");
 const constants = @import("configure/constants.zig");
 const storage = @import("storage.zig");
 const tb = @import("topic_buffer.zig");
