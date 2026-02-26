@@ -88,8 +88,8 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     const config_path = try std.fs.path.join(allocator, &.{ storage_path, config.ConfigStorage.collector_config_file });
     defer allocator.free(config_path);
 
-    var cfg = loadOrDefault(allocator, config_path);
-    defer if (cfg.arena) |a| a.deinit();
+    var existing = loadOrDefault(allocator, config_path);
+    defer if (existing.parsed) |*p| p.deinit();
 
     // Build topic entries from remote data
     const topics = try allocator.alloc(config.Config.TopicEntry, parsed.value.len);
@@ -99,11 +99,11 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
             .type_name = remote.type_name,
         };
     }
-    cfg.value.topics = topics;
+    existing.value.topics = topics;
     defer allocator.free(topics);
 
     // Write updated config
-    try writeConfig(allocator, config_path, &cfg.value);
+    try writeConfig(allocator, config_path, &existing.value);
 
     std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.len});
     for (parsed.value) |topic| {
@@ -113,21 +113,21 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
 
 const LoadResult = struct {
     value: config.Config,
-    arena: ?std.heap.ArenaAllocator,
+    parsed: ?std.json.Parsed(config.Config),
 };
 
 /// Try to load existing config; if it doesn't exist, return defaults.
+/// Caller must deinit the returned .parsed if non-null.
 fn loadOrDefault(allocator: std.mem.Allocator, path: []const u8) LoadResult {
     const parsed = config.load(allocator, path) catch {
         return .{
             .value = .{ .topics = &.{} },
-            .arena = null,
+            .parsed = null,
         };
     };
-    // We need to keep the parsed data alive, so wrap its allocator
     return .{
         .value = parsed.value,
-        .arena = null, // json.Parsed manages its own memory; caller holds parsed
+        .parsed = parsed,
     };
 }
 

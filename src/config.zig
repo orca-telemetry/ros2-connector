@@ -28,6 +28,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Con
 
     return try std.json.parseFromSlice(Config, allocator, contents, .{
         .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
     });
 }
 
