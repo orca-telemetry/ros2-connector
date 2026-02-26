@@ -10,6 +10,7 @@ pub const TimestampedMessage = struct {
 pub const MessageBuffer = struct {
     topic_name: []const u8,
     type_name: []const u8,
+    topic_schema: []const u8,
     messages: std.ArrayList(TimestampedMessage),
     total_bytes: usize,
     max_bytes: usize,
@@ -20,11 +21,13 @@ pub const MessageBuffer = struct {
     pub fn init(
         topic_name: []const u8,
         type_name: []const u8,
+        topic_schema: []const u8,
         max_bytes: usize,
     ) MessageBuffer {
         return .{
             .topic_name = topic_name,
             .type_name = type_name,
+            .topic_schema = topic_schema,
             .messages = .empty,
             .total_bytes = 0,
             .max_bytes = max_bytes,
@@ -84,6 +87,7 @@ pub const MessageBuffer = struct {
 pub const TopicSpec = struct {
     name: []const u8,
     type_name: []const u8,
+    topic_schema: []const u8,
 };
 
 /// A pool of MessageBuffers, one per subscribed topic.
@@ -101,6 +105,7 @@ pub const MessageBufferPool = struct {
             buffers[i] = MessageBuffer.init(
                 topic.name,
                 topic.type_name,
+                topic.topic_schema,
                 max_bytes_per_topic,
             );
         }

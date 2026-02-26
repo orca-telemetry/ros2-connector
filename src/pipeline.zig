@@ -136,10 +136,15 @@ pub const Pipeline = struct {
         defer allocator.free(ts_handles);
 
         for (topics, 0..) |topic, i| {
-            ts_handles[i] = try loadTypeSupport(allocator, topic.type_name);
+            const ts = try loadTypeSupport(allocator, topic.type_name);
+            const sources = ts.get_type_description_sources_func.?(ts);
+            const schema_data = try buildRos2MsgSchema(allocator, sources);
+
+            ts_handles[i] = ts;
             specs[i] = .{
                 .name = topic.topic_name,
                 .type_name = topic.type_name,
+                .topic_schema = schema_data,
             };
         }
 
@@ -330,3 +335,23 @@ pub const Pipeline = struct {
         };
     }
 };
+
+fn buildRos2MsgSchema(
+    allocator: std.mem.Allocator,
+    sources: *const c.rosidl_runtime_c__type_description__TypeSource__Sequence,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const writer = buf.writer(allocator);
+
+    for (sources.data[0..sources.size], 0..) |source, i| {
+        if (i != 0) {
+            // mcap spec 80 characters
+            try writer.writeAll("=" ** 80 ++ "\n");
+            try writer.print("MSG: {s}\n", .{source.type_name.data[0..source.type_name.size]});
+        }
+        try writer.writeAll(source.raw_file_contents.data[0..source.raw_file_contents.size]);
+    }
+
+    return buf.toOwnedSlice(allocator);
+}

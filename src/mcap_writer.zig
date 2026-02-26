@@ -52,6 +52,7 @@ pub const McapWriter = struct {
     channel_id: u16,
     topic_name: [*:0]const u8,
     type_name: [*:0]const u8,
+    topic_schema: [*:0]const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -60,13 +61,14 @@ pub const McapWriter = struct {
     ) !McapWriter {
         const topic_z = try allocator.dupeZ(u8, topic.topic_name);
         const type_z = try allocator.dupeZ(u8, topic.type_name);
+        const schema_z = try allocator.dupeZ(u8, topic.topic_schema);
 
         const channel_id = mcap_writer_add_channel(
             handle,
             topic_z.ptr,
             type_z.ptr,
-            "ros2msg",
-            "", // schema_data: empty for now, Phase 2 can populate
+            "ros2msg", // only support ros2msg for now
+            schema_z.ptr,
         );
 
         return .{
@@ -74,6 +76,7 @@ pub const McapWriter = struct {
             .channel_id = channel_id,
             .topic_name = topic_z.ptr,
             .type_name = type_z.ptr,
+            .topic_schema = schema_z.ptr,
         };
     }
 
@@ -85,7 +88,7 @@ pub const McapWriter = struct {
             self.topic_name,
             self.type_name,
             "ros2msg",
-            "",
+            self.topic_schema,
         );
     }
 

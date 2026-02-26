@@ -8,6 +8,7 @@ test "MessageBuffer: push and len" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -27,6 +28,7 @@ test "MessageBuffer: drainAll returns all messages and resets" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -57,6 +59,7 @@ test "MessageBuffer: drainAll on empty buffer" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -71,6 +74,7 @@ test "MessageBuffer: overflow drops oldest messages" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         20,
     );
     defer buf.deinit(std.testing.allocator);
@@ -104,6 +108,7 @@ test "MessageBuffer: needsFlush" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -117,6 +122,7 @@ test "MessageBuffer: push copies data" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -138,6 +144,7 @@ test "MessageBuffer: timestamps are preserved through push/drain" {
     var buf = MessageBuffer.init(
         "/test/topic",
         "std_msgs/msg/String",
+        "",
         1024,
     );
     defer buf.deinit(std.testing.allocator);
@@ -157,8 +164,8 @@ test "MessageBuffer: timestamps are preserved through push/drain" {
 
 test "MessageBufferPool: get by topic name" {
     const specs = [_]tb.TopicSpec{
-        .{ .name = "/topic_a", .type_name = "std_msgs/msg/String" },
-        .{ .name = "/topic_b", .type_name = "sensor_msgs/msg/LaserScan" },
+        .{ .name = "/topic_a", .type_name = "std_msgs/msg/String", .topic_schema = "" },
+        .{ .name = "/topic_b", .type_name = "sensor_msgs/msg/LaserScan", .topic_schema = "" },
     };
 
     var pool = try MessageBufferPool.init(std.testing.allocator, &specs, 8 * 1024 * 1024);
