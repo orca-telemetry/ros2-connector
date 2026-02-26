@@ -80,7 +80,7 @@ void mcap_writer_write_metadata(void* w, const char* name,
     for (size_t i = 0; i < count; i++) {
         meta.metadata.emplace(keys[i], values[i]);
     }
-    h->writer.write(meta);
+    (void)h->writer.write(meta);
 }
 
 int mcap_recover(const char* src, const char* dst) {

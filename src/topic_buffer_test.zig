@@ -6,38 +6,36 @@ const MessageBufferPool = tb.MessageBufferPool;
 
 test "MessageBuffer: push and len" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), buf.len());
 
-    try buf.push("hello", 100);
+    try buf.push(std.testing.allocator, "hello", 100);
     try std.testing.expectEqual(@as(usize, 1), buf.len());
     try std.testing.expectEqual(@as(usize, 5), buf.total_bytes);
 
-    try buf.push("world!", 200);
+    try buf.push(std.testing.allocator, "world!", 200);
     try std.testing.expectEqual(@as(usize, 2), buf.len());
     try std.testing.expectEqual(@as(usize, 11), buf.total_bytes);
 }
 
 test "MessageBuffer: drainAll returns all messages and resets" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
-    try buf.push("msg1", 100);
-    try buf.push("msg2", 200);
-    try buf.push("msg3", 300);
+    try buf.push(std.testing.allocator, "msg1", 100);
+    try buf.push(std.testing.allocator, "msg2", 200);
+    try buf.push(std.testing.allocator, "msg3", 300);
 
-    const messages = buf.drainAll();
+    const messages = buf.drainAll(std.testing.allocator);
     defer std.testing.allocator.free(messages);
 
     try std.testing.expectEqual(@as(usize, 3), messages.len);
@@ -57,14 +55,13 @@ test "MessageBuffer: drainAll returns all messages and resets" {
 
 test "MessageBuffer: drainAll on empty buffer" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
-    const messages = buf.drainAll();
+    const messages = buf.drainAll(std.testing.allocator);
     defer std.testing.allocator.free(messages);
     try std.testing.expectEqual(@as(usize, 0), messages.len);
 }
@@ -72,27 +69,26 @@ test "MessageBuffer: drainAll on empty buffer" {
 test "MessageBuffer: overflow drops oldest messages" {
     // max_bytes = 20, so after filling past 20 bytes, oldest get dropped
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         20,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
     // Push 10 bytes each — after second push we're at 20 (at limit, no drop)
-    try buf.push("aaaaaaaaaa", 100); // 10 bytes
+    try buf.push(std.testing.allocator, "aaaaaaaaaa", 100); // 10 bytes
     try std.testing.expectEqual(@as(u64, 0), buf.drop_count);
-    try buf.push("bbbbbbbbbb", 200); // 10 bytes, total 20
+    try buf.push(std.testing.allocator, "bbbbbbbbbb", 200); // 10 bytes, total 20
     try std.testing.expectEqual(@as(u64, 0), buf.drop_count);
 
     // Third push puts us at 30 > 20, should drop oldest
-    try buf.push("cccccccccc", 300); // 10 bytes, total would be 30 → drop "aaa..."
+    try buf.push(std.testing.allocator, "cccccccccc", 300); // 10 bytes, total would be 30 → drop "aaa..."
     try std.testing.expectEqual(@as(u64, 1), buf.drop_count);
     try std.testing.expectEqual(@as(usize, 2), buf.len());
     try std.testing.expectEqual(@as(usize, 20), buf.total_bytes);
 
     // Drain and verify we have "bbb..." and "ccc..."
-    const messages = buf.drainAll();
+    const messages = buf.drainAll(std.testing.allocator);
     defer std.testing.allocator.free(messages);
 
     try std.testing.expectEqual(@as(usize, 2), messages.len);
@@ -106,34 +102,32 @@ test "MessageBuffer: overflow drops oldest messages" {
 
 test "MessageBuffer: needsFlush" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
     try std.testing.expect(!buf.needsFlush());
-    try buf.push("data", 0);
+    try buf.push(std.testing.allocator, "data", 0);
     try std.testing.expect(buf.needsFlush());
 }
 
 test "MessageBuffer: push copies data" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
     var data = [_]u8{ 1, 2, 3, 4 };
-    try buf.push(&data, 0);
+    try buf.push(std.testing.allocator, &data, 0);
 
     // Modify the original — buffer should have a copy
     data[0] = 99;
 
-    const messages = buf.drainAll();
+    const messages = buf.drainAll(std.testing.allocator);
     defer std.testing.allocator.free(messages);
     defer for (messages) |msg| std.testing.allocator.free(msg.data);
 
@@ -142,18 +136,17 @@ test "MessageBuffer: push copies data" {
 
 test "MessageBuffer: timestamps are preserved through push/drain" {
     var buf = MessageBuffer.init(
-        std.testing.allocator,
         "/test/topic",
         "std_msgs/msg/String",
         1024,
     );
-    defer buf.deinit();
+    defer buf.deinit(std.testing.allocator);
 
-    try buf.push("first", 1000000000);
-    try buf.push("second", 2000000000);
-    try buf.push("third", 3000000000);
+    try buf.push(std.testing.allocator, "first", 1000000000);
+    try buf.push(std.testing.allocator, "second", 2000000000);
+    try buf.push(std.testing.allocator, "third", 3000000000);
 
-    const messages = buf.drainAll();
+    const messages = buf.drainAll(std.testing.allocator);
     defer std.testing.allocator.free(messages);
     defer for (messages) |msg| std.testing.allocator.free(msg.data);
 
@@ -169,7 +162,7 @@ test "MessageBufferPool: get by topic name" {
     };
 
     var pool = try MessageBufferPool.init(std.testing.allocator, &specs, 8 * 1024 * 1024);
-    defer pool.deinit();
+    defer pool.deinit(std.testing.allocator);
 
     const a = pool.get("/topic_a");
     try std.testing.expect(a != null);

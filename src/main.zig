@@ -121,7 +121,13 @@ pub fn main() !void {
         };
         defer parsed.deinit();
 
-        const cfg = cfg_mod.resolve(parsed.value);
+        const cfg = cfg_mod.resolve(allocator, parsed.value) catch |err| {
+            std.debug.print("Error: failed to resolve config: {}\n", .{err});
+            return;
+        };
+        defer if (cfg.log_directory.ptr != parsed.value.log_directory.ptr) {
+            allocator.free(cfg.log_directory);
+        };
         try cfg_mod.validate(&cfg);
 
         // Recover any .incomplete files from previous crashes
@@ -153,7 +159,7 @@ pub fn main() !void {
         std.debug.print("Node initialised. Loading config from '{s}'...\n", .{config_path});
 
         // --- Pipeline init ---
-        var pipeline = try Pipeline.init(allocator, &node, &cfg);
+        var pipeline = try Pipeline.init(allocator, &node, &rcl_ctx, &cfg);
         defer pipeline.deinit();
 
         std.debug.print("Recording to MCAP in '{s}' (robot: {s})\n", .{ cfg.log_directory, cfg.robot_id });
@@ -186,6 +192,7 @@ fn recoverIncompleteFiles(allocator: std.mem.Allocator, log_dir: []const u8) voi
             .{ log_dir, entry.name },
             0,
         ) catch continue;
+        defer allocator.free(incomplete_path);
 
         // Derive final .mcap name by stripping ".incomplete"
         const stem = entry.name[0 .. entry.name.len - ".incomplete".len];
@@ -195,6 +202,7 @@ fn recoverIncompleteFiles(allocator: std.mem.Allocator, log_dir: []const u8) voi
             .{ log_dir, stem },
             0,
         ) catch continue;
+        defer allocator.free(final_path);
 
         const tmp_path = std.fmt.allocPrintSentinel(
             allocator,
@@ -202,6 +210,7 @@ fn recoverIncompleteFiles(allocator: std.mem.Allocator, log_dir: []const u8) voi
             .{ log_dir, stem },
             0,
         ) catch continue;
+        defer allocator.free(tmp_path);
 
         std.log.info("Recovering incomplete file: {s}", .{entry.name});
 
@@ -233,6 +242,7 @@ fn recoverIncompleteFiles(allocator: std.mem.Allocator, log_dir: []const u8) voi
                 .{ log_dir, entry.name },
                 0,
             ) catch continue;
+            defer allocator.free(unrec_path);
             std.fs.cwd().renameZ(incomplete_path, unrec_path) catch |err| {
                 std.log.err("Failed to rename to .unrecoverable: {}", .{err});
             };

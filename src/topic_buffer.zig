@@ -16,10 +16,8 @@ pub const MessageBuffer = struct {
     drop_count: u64,
     messages_received: u64,
     bytes_received: u64,
-    allocator: std.mem.Allocator,
 
     pub fn init(
-        allocator: std.mem.Allocator,
         topic_name: []const u8,
         type_name: []const u8,
         max_bytes: usize,
@@ -33,33 +31,32 @@ pub const MessageBuffer = struct {
             .drop_count = 0,
             .messages_received = 0,
             .bytes_received = 0,
-            .allocator = allocator,
         };
     }
 
     /// Push a copy of the serialized message bytes into the buffer.
     /// If the buffer exceeds max_bytes, drops the oldest message.
-    pub fn push(self: *MessageBuffer, serialized_bytes: []const u8, timestamp_ns: u64) !void {
+    pub fn push(self: *MessageBuffer, allocator: std.mem.Allocator, serialized_bytes: []const u8, timestamp_ns: u64) !void {
         self.messages_received += 1;
         self.bytes_received += serialized_bytes.len;
 
-        const copy = try self.allocator.dupe(u8, serialized_bytes);
-        try self.messages.append(self.allocator, .{ .data = copy, .timestamp_ns = timestamp_ns });
+        const copy = try allocator.dupe(u8, serialized_bytes);
+        try self.messages.append(allocator, .{ .data = copy, .timestamp_ns = timestamp_ns });
         self.total_bytes += copy.len;
 
         // Drop oldest messages while over budget
         while (self.total_bytes > self.max_bytes and self.messages.items.len > 1) {
             const oldest = self.messages.orderedRemove(0);
             self.total_bytes -= oldest.data.len;
-            self.allocator.free(oldest.data);
+            allocator.free(oldest.data);
             self.drop_count += 1;
         }
     }
 
     /// Return all buffered messages and reset the buffer.
     /// After drainAll, the caller owns the returned slice and all message slices.
-    pub fn drainAll(self: *MessageBuffer) []TimestampedMessage {
-        const items = self.messages.toOwnedSlice(self.allocator) catch {
+    pub fn drainAll(self: *MessageBuffer, allocator: std.mem.Allocator) []TimestampedMessage {
+        const items = self.messages.toOwnedSlice(allocator) catch {
             // On OOM for the owned slice, just return empty — messages stay buffered
             return &.{};
         };
@@ -75,11 +72,11 @@ pub const MessageBuffer = struct {
         return self.messages.items.len > 0;
     }
 
-    pub fn deinit(self: *MessageBuffer) void {
+    pub fn deinit(self: *MessageBuffer, allocator: std.mem.Allocator) void {
         for (self.messages.items) |msg| {
-            self.allocator.free(msg.data);
+            allocator.free(msg.data);
         }
-        self.messages.deinit(self.allocator);
+        self.messages.deinit(allocator);
     }
 };
 
@@ -90,36 +87,32 @@ pub const TopicSpec = struct {
 };
 
 /// A pool of MessageBuffers, one per subscribed topic.
+/// Unmanaged — caller provides the allocator to each method.
 pub const MessageBufferPool = struct {
-    arena: std.heap.ArenaAllocator,
     buffers: []MessageBuffer,
 
     pub fn init(
-        backing: std.mem.Allocator,
+        allocator: std.mem.Allocator,
         topics: []const TopicSpec,
         max_bytes_per_topic: usize,
     ) !MessageBufferPool {
-        var arena = std.heap.ArenaAllocator.init(backing);
-        const allocator = arena.allocator();
-
         const buffers = try allocator.alloc(MessageBuffer, topics.len);
         for (topics, 0..) |topic, i| {
             buffers[i] = MessageBuffer.init(
-                allocator,
                 topic.name,
                 topic.type_name,
                 max_bytes_per_topic,
             );
         }
 
-        return .{ .arena = arena, .buffers = buffers };
+        return .{ .buffers = buffers };
     }
 
-    pub fn deinit(self: *MessageBufferPool) void {
+    pub fn deinit(self: *MessageBufferPool, allocator: std.mem.Allocator) void {
         for (self.buffers) |*buf| {
-            buf.deinit();
+            buf.deinit(allocator);
         }
-        self.arena.deinit();
+        allocator.free(self.buffers);
     }
 
     /// Find a buffer by topic name. O(n) — fine for typical topic counts (<100).

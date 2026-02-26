@@ -2,6 +2,7 @@ const std = @import("std");
 const tb = @import("topic_buffer.zig");
 
 const MessageBuffer = tb.MessageBuffer;
+const MessageBufferPool = tb.MessageBufferPool;
 
 // ---------------------------------------------------------------------------
 // C++ MCAP bridge — implemented in mcap_bridge.cpp
@@ -104,7 +105,7 @@ pub const McapWriter = struct {
     /// Drain all messages from the buffer and write each as a separate MCAP message.
     /// Returns the total bytes written.
     pub fn flush(self: *McapWriter, buf: *MessageBuffer, allocator: std.mem.Allocator) !u64 {
-        const messages = buf.drainAll();
+        const messages = buf.drainAll(allocator);
         if (messages.len == 0) return 0;
         defer allocator.free(messages);
 
@@ -125,7 +126,6 @@ pub const McapWriter = struct {
 pub const McapWriterPool = struct {
     handle: *anyopaque,
     writers: []McapWriter,
-    allocator: std.mem.Allocator,
     file_path: [:0]const u8,
     incomplete_path: [:0]const u8,
     out_dir: []const u8,
@@ -174,7 +174,6 @@ pub const McapWriterPool = struct {
         return .{
             .handle = handle,
             .writers = writers,
-            .allocator = allocator,
             .file_path = filename,
             .incomplete_path = incomplete,
             .out_dir = out_dir,
@@ -190,20 +189,20 @@ pub const McapWriterPool = struct {
         };
     }
 
-    pub fn flushAll(self: *McapWriterPool, buf_pool: *tb.MessageBufferPool) !void {
+    pub fn flushAll(self: *McapWriterPool, buf_pool: *MessageBufferPool, allocator: std.mem.Allocator) !void {
         for (self.writers, buf_pool.buffers) |*writer, *buf| {
             if (buf.needsFlush()) {
-                const bytes = try writer.flush(buf, buf.allocator);
+                const bytes = try writer.flush(buf, allocator);
                 self.bytes_written += bytes;
             }
         }
     }
 
     /// Drain any remaining messages — call on shutdown.
-    pub fn forceFlushAll(self: *McapWriterPool, buf_pool: *tb.MessageBufferPool) !void {
+    pub fn forceFlushAll(self: *McapWriterPool, buf_pool: *MessageBufferPool, allocator: std.mem.Allocator) !void {
         for (self.writers, buf_pool.buffers) |*writer, *buf| {
             if (buf.len() > 0) {
-                const bytes = try writer.flush(buf, buf.allocator);
+                const bytes = try writer.flush(buf, allocator);
                 self.bytes_written += bytes;
             }
         }
@@ -218,23 +217,23 @@ pub const McapWriterPool = struct {
     }
 
     /// Rotate: close current file, open a new one, re-register all channels.
-    pub fn rotate(self: *McapWriterPool) !void {
+    pub fn rotate(self: *McapWriterPool, allocator: std.mem.Allocator) !void {
         // Close and finalize the current file
-        self.closeAndFinalize();
+        self.closeAndFinalize(allocator);
 
         // Next sequence
         self.sequence += 1;
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
 
         const new_filename = try generateFilename(
-            self.allocator,
+            allocator,
             self.out_dir,
             self.robot_id,
             now_ns,
             self.sequence,
         );
         const new_incomplete = try std.fmt.allocPrintSentinel(
-            self.allocator,
+            allocator,
             "{s}.incomplete",
             .{new_filename},
             0,
@@ -244,7 +243,7 @@ pub const McapWriterPool = struct {
             return error.McapOpenFailed;
 
         // Write session metadata for the new file
-        writeSessionMetadata(self.allocator, new_handle, self.robot_id, self.software_version, now_ns, self.sequence);
+        writeSessionMetadata(allocator, new_handle, self.robot_id, self.software_version, now_ns, self.sequence);
 
         // Re-register all channels on the new handle
         for (self.writers) |*writer| {
@@ -260,10 +259,10 @@ pub const McapWriterPool = struct {
     }
 
     /// Check and rotate if needed. Returns true if a rotation occurred.
-    pub fn rotateIfNeeded(self: *McapWriterPool) !bool {
+    pub fn rotateIfNeeded(self: *McapWriterPool, allocator: std.mem.Allocator) !bool {
         if (self.shouldRotate()) {
             const old_path = self.file_path;
-            try self.rotate();
+            try self.rotate(allocator);
             std.log.info("Rotated MCAP file: {s} -> {s}", .{ old_path, self.file_path });
             return true;
         }
@@ -290,11 +289,11 @@ pub const McapWriterPool = struct {
     }
 
     /// Close the MCAP file, fsync, rename, and write checksum.
-    pub fn finish(self: *McapWriterPool) void {
-        self.closeAndFinalize();
+    pub fn finish(self: *McapWriterPool, allocator: std.mem.Allocator) void {
+        self.closeAndFinalize(allocator);
     }
 
-    fn closeAndFinalize(self: *McapWriterPool) void {
+    fn closeAndFinalize(self: *McapWriterPool, allocator: std.mem.Allocator) void {
         mcap_writer_close(self.handle);
 
         // Re-open the .incomplete file and fsync to ensure data is on disk
@@ -318,7 +317,7 @@ pub const McapWriterPool = struct {
         };
 
         // Write SHA-256 checksum file
-        writeSha256File(self.allocator, self.file_path) catch |err| {
+        writeSha256File(allocator, self.file_path) catch |err| {
             std.log.err("Failed to write SHA-256 for {s}: {}", .{ self.file_path, err });
         };
     }
@@ -425,7 +424,9 @@ pub fn writeSha256File(allocator: std.mem.Allocator, path: [:0]const u8) !void {
 
     // Write to .sha256.tmp, fsync, rename to .sha256
     const tmp_path = try std.fmt.allocPrintSentinel(allocator, "{s}.sha256.tmp", .{path_slice}, 0);
+    defer allocator.free(tmp_path);
     const final_path = try std.fmt.allocPrintSentinel(allocator, "{s}.sha256", .{path_slice}, 0);
+    defer allocator.free(final_path);
 
     const sha_file = try std.fs.cwd().createFileZ(tmp_path, .{});
     errdefer sha_file.close();

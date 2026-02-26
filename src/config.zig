@@ -3,7 +3,7 @@ const crypto = std.crypto;
 
 pub const Config = struct {
     robot_id: []const u8 = "robot_001",
-    log_directory: []const u8 = "/data/logs",
+    log_directory: []const u8 = "",
     max_bag_duration_s: u32 = 60,
     max_bag_size_mb: u32 = 512,
     write_buffer_mb: u32 = 8,
@@ -35,7 +35,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Con
 /// Apply environment variable overrides. Returns a new Config with overridden values.
 /// The returned Config borrows from both the original parsed config and env var strings,
 /// so the caller must keep both alive.
-pub fn resolve(cfg: Config) Config {
+pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     var result = cfg;
     if (std.posix.getenv("RDL_ROBOT_ID")) |val| {
         result.robot_id = val;
@@ -55,6 +55,13 @@ pub fn resolve(cfg: Config) Config {
     if (std.posix.getenv("RDL_STATUS_INTERVAL_S")) |val| {
         result.status_interval_s = std.fmt.parseInt(u32, val, 10) catch result.status_interval_s;
     }
+
+    // If log_directory is still empty (default), resolve to ~/.orca/logs
+    if (result.log_directory.len == 0) {
+        const home = std.posix.getenv("HOME") orelse "/tmp";
+        result.log_directory = try std.fs.path.join(allocator, &.{ home, ".orca", "logs" });
+    }
+
     return result;
 }
 
@@ -65,13 +72,10 @@ pub fn validate(cfg: *const Config) !void {
         return error.NoTopics;
     }
 
-    // Ensure log directory exists (create if needed)
-    std.fs.makeDirAbsolute(cfg.log_directory) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => {
-            std.debug.print("Error: cannot create log directory '{s}': {}\n", .{ cfg.log_directory, err });
-            return err;
-        },
+    // Ensure log directory exists (create nested directories if needed)
+    std.fs.cwd().makePath(cfg.log_directory) catch |err| {
+        std.debug.print("Error: cannot create log directory '{s}': {}\n", .{ cfg.log_directory, err });
+        return err;
     };
 }
 

@@ -40,7 +40,6 @@ const StatusPayload = struct {
 // ---------------------------------------------------------------------------
 
 pub const StatusReporter = struct {
-    allocator: std.mem.Allocator,
     robot_id: []const u8,
     software_version: []const u8,
     log_dir_z: [*:0]const u8,
@@ -58,34 +57,25 @@ pub const StatusReporter = struct {
     ) StatusReporter {
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
 
+        const disabled: StatusReporter = .{
+            .robot_id = "",
+            .software_version = software_version,
+            .log_dir_z = log_dir_z,
+            .interval_ns = 0,
+            .last_report_ns = now_ns,
+            .start_ns = now_ns,
+            .total_bytes_written = 0,
+            .enabled = false,
+        };
+
         if (status_interval_s == 0) {
-            return .{
-                .allocator = allocator,
-                .robot_id = "",
-                .software_version = software_version,
-                .log_dir_z = log_dir_z,
-                .interval_ns = 0,
-                .last_report_ns = now_ns,
-                .start_ns = now_ns,
-                .total_bytes_written = 0,
-                .enabled = false,
-            };
+            return disabled;
         }
 
         // Try to get robot_id from provisioning config
         const robot_id = config.ConfigStorage.getRobotId(allocator) catch {
             log.warn("Orca cloud status reporting disabled: robot not provisioned", .{});
-            return .{
-                .allocator = allocator,
-                .robot_id = "",
-                .software_version = software_version,
-                .log_dir_z = log_dir_z,
-                .interval_ns = 0,
-                .last_report_ns = now_ns,
-                .start_ns = now_ns,
-                .total_bytes_written = 0,
-                .enabled = false,
-            };
+            return disabled;
         };
 
         const interval_ns: u64 = @as(u64, status_interval_s) * std.time.ns_per_s;
@@ -93,7 +83,6 @@ pub const StatusReporter = struct {
         log.info("Status reporting enabled: every {d}s to {s}", .{ status_interval_s, constants.status_base_url });
 
         return .{
-            .allocator = allocator,
             .robot_id = robot_id,
             .software_version = software_version,
             .log_dir_z = log_dir_z,
@@ -114,6 +103,7 @@ pub const StatusReporter = struct {
     /// Never propagates errors — logs warnings instead.
     pub fn maybeSend(
         self: *StatusReporter,
+        allocator: std.mem.Allocator,
         writer_pool: *const mcap.McapWriterPool,
         buf_pool: *const tb.MessageBufferPool,
     ) void {
@@ -123,13 +113,14 @@ pub const StatusReporter = struct {
         if (now_ns - self.last_report_ns < self.interval_ns) return;
 
         self.last_report_ns = now_ns;
-        self.sendStatus(writer_pool, buf_pool, now_ns) catch |err| {
+        self.sendStatus(allocator, writer_pool, buf_pool, now_ns) catch |err| {
             log.warn("Status report failed: {}", .{err});
         };
     }
 
     fn sendStatus(
         self: *StatusReporter,
+        allocator: std.mem.Allocator,
         writer_pool: *const mcap.McapWriterPool,
         buf_pool: *const tb.MessageBufferPool,
         now_ns: u64,
@@ -137,8 +128,8 @@ pub const StatusReporter = struct {
         const base64_encoder = std.base64.standard.Encoder;
 
         // Build per-topic stats
-        const topic_stats = try self.allocator.alloc(TopicStatus, buf_pool.buffers.len);
-        defer self.allocator.free(topic_stats);
+        const topic_stats = try allocator.alloc(TopicStatus, buf_pool.buffers.len);
+        defer allocator.free(topic_stats);
 
         for (buf_pool.buffers, 0..) |*buf, i| {
             topic_stats[i] = .{
@@ -175,25 +166,25 @@ pub const StatusReporter = struct {
         };
 
         // Serialize to JSON
-        var body_payload: std.Io.Writer.Allocating = .init(self.allocator);
+        var body_payload: std.Io.Writer.Allocating = .init(allocator);
         defer body_payload.deinit();
         try body_payload.writer.print("{f}", .{std.json.fmt(payload, .{})});
         const json_bytes = body_payload.written();
 
         // Sign payload
-        const sig_bytes = try config.ConfigStorage.signPayload(self.allocator, json_bytes);
+        const sig_bytes = try config.ConfigStorage.signPayload(allocator, json_bytes);
         var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
         _ = base64_encoder.encode(&sig_b64, &sig_bytes);
 
         // HTTP POST
-        var client = http.Client{ .allocator = self.allocator };
+        var client = http.Client{ .allocator = allocator };
         defer client.deinit();
 
-        var response_body: std.Io.Writer.Allocating = .init(self.allocator);
+        var response_body: std.Io.Writer.Allocating = .init(allocator);
         defer response_body.deinit();
 
-        const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ constants.status_base_url, self.robot_id });
-        defer self.allocator.free(url);
+        const url = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ constants.status_base_url, self.robot_id });
+        defer allocator.free(url);
 
         const result = try client.fetch(.{
             .method = .POST,

@@ -121,6 +121,7 @@ pub const Pipeline = struct {
     pub fn init(
         backing: std.mem.Allocator,
         node: *c.rcl_node_t,
+        context: *c.rcl_context_t,
         cfg: *const Config,
     ) !Pipeline {
         var arena = std.heap.ArenaAllocator.init(backing);
@@ -130,7 +131,9 @@ pub const Pipeline = struct {
 
         // 1. Build topic specs and load type supports
         const specs = try allocator.alloc(TopicSpec, topics.len);
+        defer allocator.free(specs);
         const ts_handles = try allocator.alloc(*const c.rosidl_message_type_support_t, topics.len);
+        defer allocator.free(ts_handles);
 
         for (topics, 0..) |topic, i| {
             ts_handles[i] = try loadTypeSupport(allocator, topic.type_name);
@@ -174,8 +177,6 @@ pub const Pipeline = struct {
 
         // 6. Init wait set
         var wait_set = c.rcl_get_zero_initialized_wait_set();
-        const ctx = c.rcl_get_zero_initialized_context();
-        const newCtx = @constCast(&ctx);
         const ret = c.rcl_wait_set_init(
             &wait_set,
             subs.len,
@@ -184,7 +185,7 @@ pub const Pipeline = struct {
             0,
             0,
             0,
-            newCtx,
+            context,
             c.rcutils_get_default_allocator(),
         );
         if (ret != c.RCL_RET_OK) return error.WaitSetInitFailed;
@@ -213,14 +214,15 @@ pub const Pipeline = struct {
     }
 
     pub fn deinit(self: *Pipeline) void {
+        const allocator = self.arena.allocator();
         // Final flush — drain any remaining messages
-        self.writer_pool.forceFlushAll(&self.buf_pool) catch |err| {
+        self.writer_pool.forceFlushAll(&self.buf_pool, allocator) catch |err| {
             std.debug.print("Warning: final flush failed: {}\n", .{err});
         };
         for (self.subs) |*sub| finiSubscription(sub, self.node);
         _ = c.rcl_wait_set_fini(&self.wait_set);
-        self.writer_pool.finish();
-        self.buf_pool.deinit();
+        self.writer_pool.finish(allocator);
+        self.buf_pool.deinit(allocator);
         self.arena.deinit();
     }
 
@@ -241,10 +243,10 @@ pub const Pipeline = struct {
             // Block with 100ms timeout so we flush on quiet topics
             const ret = c.rcl_wait(&self.wait_set, 100 * std.time.ns_per_ms);
             if (ret == c.RCL_RET_TIMEOUT) {
-                try self.writer_pool.flushAll(&self.buf_pool);
+                try self.writer_pool.flushAll(&self.buf_pool, self.arena.allocator());
                 self.maybeRotate();
                 self.writer_pool.periodicFsync();
-                self.status_reporter.maybeSend(&self.writer_pool, &self.buf_pool);
+                self.status_reporter.maybeSend(self.arena.allocator(), &self.writer_pool, &self.buf_pool);
                 continue;
             }
             if (ret != c.RCL_RET_OK) return error.WaitFailed;
@@ -256,12 +258,12 @@ pub const Pipeline = struct {
             }
 
             // Flush topics that have hit the message threshold
-            try self.writer_pool.flushAll(&self.buf_pool);
+            try self.writer_pool.flushAll(&self.buf_pool, self.arena.allocator());
 
             // Check if file rotation is needed (duration or size limit)
             self.maybeRotate();
             self.writer_pool.periodicFsync();
-            self.status_reporter.maybeSend(&self.writer_pool, &self.buf_pool);
+            self.status_reporter.maybeSend(self.arena.allocator(), &self.writer_pool, &self.buf_pool);
         }
     }
 
@@ -272,7 +274,7 @@ pub const Pipeline = struct {
         const old_bytes = self.writer_pool.bytes_written;
         const old_path = self.writer_pool.file_path;
 
-        self.writer_pool.rotate() catch |err| {
+        self.writer_pool.rotate(self.arena.allocator()) catch |err| {
             std.log.err("File rotation failed: {}", .{err});
             return;
         };
@@ -298,7 +300,6 @@ pub const Pipeline = struct {
     }
 
     fn receiveOne(self: *Pipeline, sub: *Subscription) void {
-        _ = self;
         var msg_info: c.rmw_message_info_t = undefined;
 
         const ret = c.rcl_take_serialized_message(
@@ -324,7 +325,7 @@ pub const Pipeline = struct {
 
         // Copy the serialized bytes into the message buffer
         const data = sub.serialized_msg.buffer[0..sub.serialized_msg.buffer_length];
-        sub.buf.push(data, timestamp_ns) catch |err| {
+        sub.buf.push(self.arena.allocator(), data, timestamp_ns) catch |err| {
             std.debug.print("Warning: buffer push failed for {s}: {}\n", .{ sub.topic_name, err });
         };
     }
