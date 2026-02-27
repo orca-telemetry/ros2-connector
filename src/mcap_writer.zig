@@ -378,7 +378,7 @@ pub const McapWriterPool = struct {
                 .id = writer.channel_id,
                 .schema_id = writer.schema_id,
                 .topic = .{ .str = writer.topic_name },
-                .message_encoding = .{ .str = "cdr" },
+                .message_encoding = .{ .str = "ros2msg" },
                 .metadata = .{ .entries = &empty_entries },
             }) catch |err| {
                 std.log.err("Failed to write summary Channel: {}", .{err});

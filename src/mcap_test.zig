@@ -336,7 +336,7 @@ test "Channel: parse with metadata" {
     try w.writeU16(testing.allocator, 3);
     try w.writeU16(testing.allocator, 1);
     try w.writePrefixedStr(testing.allocator, "/cmd_vel");
-    try w.writePrefixedStr(testing.allocator, "cdr");
+    try w.writePrefixedStr(testing.allocator, "ros2msg");
     // metadata: one entry
     const inner = "\x03\x00\x00\x00key\x05\x00\x00\x00value";
     try w.writeU32(testing.allocator, @intCast(inner.len));
@@ -346,7 +346,7 @@ test "Channel: parse with metadata" {
     try testing.expectEqual(@as(u16, 3), c.id);
     try testing.expectEqual(@as(u16, 1), c.schema_id);
     try testing.expectEqualStrings("/cmd_vel", c.topic.str);
-    try testing.expectEqualStrings("cdr", c.message_encoding.str);
+    try testing.expectEqualStrings("ros2msg", c.message_encoding.str);
     try testing.expectEqual(@as(usize, 1), c.metadata.entries.len);
     try testing.expectEqualStrings("key", c.metadata.entries[0].key.str);
     try testing.expectEqualStrings("value", c.metadata.entries[0].value.str);
