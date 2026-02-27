@@ -30,7 +30,11 @@ fn initSubscription(
     type_support: *const c.rosidl_message_type_support_t,
 ) !Subscription {
     var sub = c.rcl_get_zero_initialized_subscription();
-    const opts = c.rcl_subscription_get_default_options();
+    var opts = c.rcl_subscription_get_default_options();
+    opts.qos.reliability = c.RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
+    opts.qos.durability = c.RMW_QOS_POLICY_DURABILITY_VOLATILE;
+    opts.qos.history = c.RMW_QOS_POLICY_HISTORY_KEEP_LAST;
+    opts.qos.depth = 10;
 
     const topic_z = try allocator.dupeZ(u8, cfg.topic_name);
     defer allocator.free(topic_z);
@@ -137,8 +141,7 @@ pub const Pipeline = struct {
 
         for (topics, 0..) |topic, i| {
             const ts = try loadTypeSupport(allocator, topic.type_name);
-            const sources = ts.get_type_description_sources_func.?(ts);
-            const schema_data = try buildRos2MsgSchema(allocator, sources);
+            const schema_data = try buildRos2MsgSchema(allocator, ts);
 
             ts_handles[i] = ts;
             specs[i] = .{
@@ -338,19 +341,65 @@ pub const Pipeline = struct {
 
 fn buildRos2MsgSchema(
     allocator: std.mem.Allocator,
-    sources: *const c.rosidl_runtime_c__type_description__TypeSource__Sequence,
+    ts: *const c.rosidl_message_type_support_t,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const writer = buf.writer(allocator);
 
-    for (sources.data[0..sources.size], 0..) |source, i| {
-        if (i != 0) {
-            // mcap spec 80 characters
-            try writer.writeAll("=" ** 80 ++ "\n");
-            try writer.print("MSG: {s}\n", .{source.type_name.data[0..source.type_name.size]});
+    // Write the top-level .msg source (index 0 from this type's sources)
+    const top_sources_ptr = ts.get_type_description_sources_func.?(ts);
+    const top_sources = top_sources_ptr.*;
+    if (top_sources.size == 0) return error.NoTypeSources;
+    const top_src = top_sources.data[0];
+    try writer.writeAll(top_src.raw_file_contents.data[0..top_src.raw_file_contents.size]);
+    if (top_src.raw_file_contents.size > 0 and
+        top_src.raw_file_contents.data[top_src.raw_file_contents.size - 1] != '\n')
+    {
+        try writer.writeByte('\n');
+    }
+
+    // Get the full type description to find referenced types
+    const type_desc_ptr = ts.get_type_description_func.?(ts);
+    const type_desc = type_desc_ptr.*;
+    const refs = type_desc.referenced_type_descriptions;
+
+    for (refs.data[0..refs.size]) |ref_type| {
+        const ref_name = ref_type.type_name.data[0..ref_type.type_name.size];
+
+        // Separator
+        try writer.writeAll("=" ** 80 ++ "\n");
+
+        // MSG: header with short name (strip /msg/, /srv/, /action/)
+        if (std.mem.indexOf(u8, ref_name, "/msg/")) |pos| {
+            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
+        } else if (std.mem.indexOf(u8, ref_name, "/srv/")) |pos| {
+            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
+        } else if (std.mem.indexOf(u8, ref_name, "/action/")) |pos| {
+            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 8 ..] });
+        } else {
+            try writer.print("MSG: {s}\n", .{ref_name});
         }
-        try writer.writeAll(source.raw_file_contents.data[0..source.raw_file_contents.size]);
+
+        // Load the referenced type's own type support to get its .msg source
+        const ref_ts = loadTypeSupport(allocator, ref_name) catch |err| {
+            std.log.warn("Could not load type support for {s}: {}", .{ ref_name, err });
+            try writer.writeAll("# source unavailable\n");
+            continue;
+        };
+        const ref_sources_ptr = ref_ts.get_type_description_sources_func.?(ref_ts);
+        const ref_sources = ref_sources_ptr.*;
+        if (ref_sources.size == 0) {
+            try writer.writeAll("# source unavailable\n");
+            continue;
+        }
+        const ref_src = ref_sources.data[0];
+        try writer.writeAll(ref_src.raw_file_contents.data[0..ref_src.raw_file_contents.size]);
+        if (ref_src.raw_file_contents.size > 0 and
+            ref_src.raw_file_contents.data[ref_src.raw_file_contents.size - 1] != '\n')
+        {
+            try writer.writeByte('\n');
+        }
     }
 
     return buf.toOwnedSlice(allocator);
