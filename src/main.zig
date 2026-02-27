@@ -7,7 +7,6 @@ const provision = @import("configure/provision.zig");
 const discovery = @import("configure/discovery.zig");
 const sync = @import("configure/sync.zig");
 
-
 // ---------------------------------------------------------------------------
 // Signal handling — graceful shutdown on SIGINT / SIGTERM
 // ---------------------------------------------------------------------------

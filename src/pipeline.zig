@@ -352,10 +352,15 @@ fn buildRos2MsgSchema(
     const top_sources = top_sources_ptr.*;
     if (top_sources.size == 0) return error.NoTypeSources;
     const top_src = top_sources.data[0];
-    try writer.writeAll(top_src.raw_file_contents.data[0..top_src.raw_file_contents.size]);
-    if (top_src.raw_file_contents.size > 0 and
-        top_src.raw_file_contents.data[top_src.raw_file_contents.size - 1] != '\n')
-    {
+    const top_contents_trimmed = std.mem.trimRight(
+        u8,
+        top_src.raw_file_contents.data[0..top_src.raw_file_contents.size],
+        " \n\t\r\x00",
+    );
+
+    try writer.writeAll(top_contents_trimmed);
+
+    if (top_contents_trimmed.len > 0) {
         try writer.writeByte('\n');
     }
 
@@ -395,10 +400,13 @@ fn buildRos2MsgSchema(
                 continue;
             }
             const ref_src = ref_sources.data[0];
-            try writer.writeAll(ref_src.raw_file_contents.data[0..ref_src.raw_file_contents.size]);
-            if (ref_src.raw_file_contents.size > 0 and
-                ref_src.raw_file_contents.data[ref_src.raw_file_contents.size - 1] != '\n')
-            {
+            const inner_contents_trimmed = std.mem.trimRight(
+                u8,
+                ref_src.raw_file_contents.data[0..ref_src.raw_file_contents.size],
+                " \n\r\t\x00",
+            );
+            try writer.writeAll(inner_contents_trimmed);
+            if (inner_contents_trimmed.len > 0) {
                 try writer.writeByte('\n');
             }
         }
