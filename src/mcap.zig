@@ -693,26 +693,18 @@ pub const McapIterator = struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CRC-32 helper (ISO 3309 / ITU-T V.42 polynomial)
-// ─────────────────────────────────────────────────────────────────────────────
-
-pub fn crc32(data: []const u8) u32 {
-    return std.hash.Crc32.hash(data);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Writer  (serialiser)
 //
-// The Writer turns typed structs back into the binary wire format so we can
-// verify parse → write → parse produces identical data.
+// The Writer turns typed structs back into the binary wire format
 // ─────────────────────────────────────────────────────────────────────────────
-
 pub const Writer = struct {
     buf: std.ArrayList(u8),
+    crc: ?std.hash.Crc32 = null, // safer to store the crc by value
 
-    pub fn init() Writer {
+    pub fn init(previous_crc: ?std.hash.Crc32) Writer {
         const buf: std.ArrayList(u8) = .empty;
-        return .{ .buf = buf };
+
+        return .{ .buf = buf, .crc = previous_crc orelse std.hash.Crc32.init() };
     }
 
     pub fn deinit(self: *Writer, allocator: std.mem.Allocator) void {
@@ -726,33 +718,48 @@ pub const Writer = struct {
     // ── low-level helpers ────────────────────────────────────────────────────
 
     fn writeU8(self: *Writer, allocator: std.mem.Allocator, v: u8) !void {
+        if (self.crc) |*c| {
+            c.update(&[_]u8{v});
+        }
         try self.buf.append(allocator, v);
     }
 
     pub fn writeU16(self: *Writer, allocator: std.mem.Allocator, v: u16) !void {
         var tmp: [2]u8 = undefined;
         std.mem.writeInt(u16, &tmp, v, .little);
+        if (self.crc) |*c| {
+            c.update(&tmp);
+        }
         try self.buf.appendSlice(allocator, &tmp);
     }
 
     pub fn writeU32(self: *Writer, allocator: std.mem.Allocator, v: u32) !void {
         var tmp: [4]u8 = undefined;
         std.mem.writeInt(u32, &tmp, v, .little);
+        if (self.crc) |*c| {
+            c.update(&tmp);
+        }
         try self.buf.appendSlice(allocator, &tmp);
     }
 
     pub fn writeU64(self: *Writer, allocator: std.mem.Allocator, v: u64) !void {
         var tmp: [8]u8 = undefined;
         std.mem.writeInt(u64, &tmp, v, .little);
+        if (self.crc) |*c| {
+            c.update(&tmp);
+        }
         try self.buf.appendSlice(allocator, &tmp);
     }
 
     pub fn writePrefixedStr(self: *Writer, allocator: std.mem.Allocator, s: []const u8) !void {
         try self.writeU32(allocator, @intCast(s.len));
-        try self.buf.appendSlice(allocator, s);
+        try self.writeBytes(allocator, s);
     }
 
     pub fn writeBytes(self: *Writer, allocator: std.mem.Allocator, b: []const u8) !void {
+        if (self.crc) |*c| {
+            c.update(b);
+        }
         try self.buf.appendSlice(allocator, b);
     }
 
@@ -782,6 +789,11 @@ pub const Writer = struct {
 
     /// Build a body into a temporary buffer, then emit it as a record.
     fn writeRecordFromBody(self: *Writer, allocator: std.mem.Allocator, op: Opcode, body_writer: *Writer) !void {
+        // FIXME:
+        // Just borrow the data instead of taking ownership.
+        // This avoids an extra allocation and a free.
+        //
+        //  const body = body_writer.buf.items;
         const body = try body_writer.buf.toOwnedSlice(allocator);
         defer allocator.free(body);
         try self.writeRecord(allocator, op, body);
@@ -795,7 +807,7 @@ pub const Writer = struct {
 
     // ── typed record writers ─────────────────────────────────────────────────
     pub fn writeHeader(self: *Writer, allocator: std.mem.Allocator, h: Header) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writePrefixedStr(allocator, h.profile.str);
         try b.writePrefixedStr(allocator, h.library.str);
@@ -811,7 +823,7 @@ pub const Writer = struct {
     }
 
     pub fn writeSchema(self: *Writer, allocator: std.mem.Allocator, s: Schema) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU16(allocator, s.id);
         try b.writePrefixedStr(allocator, s.name.str);
@@ -822,7 +834,7 @@ pub const Writer = struct {
     }
 
     pub fn writeChannel(self: *Writer, allocator: std.mem.Allocator, c: Channel) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU16(allocator, c.id);
         try b.writeU16(allocator, c.schema_id);
@@ -833,7 +845,7 @@ pub const Writer = struct {
     }
 
     pub fn writeMessage(self: *Writer, allocator: std.mem.Allocator, m: Message) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU16(allocator, m.channel_id);
         try b.writeU32(allocator, m.sequence);
@@ -844,7 +856,7 @@ pub const Writer = struct {
     }
 
     pub fn writeChunk(self: *Writer, allocator: std.mem.Allocator, c: Chunk) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, c.message_start_time);
         try b.writeU64(allocator, c.message_end_time);
@@ -857,7 +869,7 @@ pub const Writer = struct {
     }
 
     pub fn writeMessageIndex(self: *Writer, allocator: std.mem.Allocator, mi: MessageIndex) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU16(allocator, mi.channel_id);
         // entries payload: each entry is 8+8 bytes
@@ -871,7 +883,7 @@ pub const Writer = struct {
     }
 
     pub fn writeChunkIndex(self: *Writer, allocator: std.mem.Allocator, ci: ChunkIndex) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, ci.message_start_time);
         try b.writeU64(allocator, ci.message_end_time);
@@ -892,7 +904,7 @@ pub const Writer = struct {
     }
 
     pub fn writeAttachment(self: *Writer, allocator: std.mem.Allocator, a: Attachment) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, a.log_time);
         try b.writeU64(allocator, a.create_time);
@@ -905,7 +917,7 @@ pub const Writer = struct {
     }
 
     pub fn writeAttachmentIndex(self: *Writer, allocator: std.mem.Allocator, ai: AttachmentIndex) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, ai.ofs_attachment);
         try b.writeU64(allocator, ai.len_attachment);
@@ -918,7 +930,7 @@ pub const Writer = struct {
     }
 
     pub fn writeStatistics(self: *Writer, allocator: std.mem.Allocator, s: Statistics) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, s.message_count);
         try b.writeU16(allocator, s.schema_count);
@@ -938,7 +950,7 @@ pub const Writer = struct {
     }
 
     pub fn writeMetadata(self: *Writer, allocator: std.mem.Allocator, m: Metadata) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writePrefixedStr(allocator, m.name.str);
         try b.writeMapStrStr(allocator, m.metadata.entries);
@@ -946,7 +958,7 @@ pub const Writer = struct {
     }
 
     pub fn writeMetadataIndex(self: *Writer, allocator: std.mem.Allocator, mi: MetadataIndex) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU64(allocator, mi.ofs_metadata);
         try b.writeU64(allocator, mi.len_metadata);
@@ -955,7 +967,7 @@ pub const Writer = struct {
     }
 
     pub fn writeSummaryOffset(self: *Writer, allocator: std.mem.Allocator, so: SummaryOffset) !void {
-        var b = Writer.init();
+        var b = Writer.init(null);
         defer b.deinit(allocator);
         try b.writeU8(allocator, @intFromEnum(so.group_opcode));
         try b.writeU64(allocator, so.ofs_group);
@@ -963,9 +975,14 @@ pub const Writer = struct {
         try self.writeRecordFromBody(allocator, .summary_offset, &b);
     }
 
-    pub fn writeDataEnd(self: *Writer, allocator: std.mem.Allocator, de: DataEnd) !void {
+    pub fn writeDataEnd(self: *Writer, allocator: std.mem.Allocator) !void {
+        // capture the crc before writing data end records
+        var final_crc: u32 = 0;
+        if (self.crc) |crc| {
+            final_crc = crc.final();
+        }
         var body: [4]u8 = undefined;
-        std.mem.writeInt(u32, &body, de.data_section_crc32, .little);
+        std.mem.writeInt(u32, &body, final_crc, .little);
         try self.writeRecord(allocator, .data_end, &body);
     }
 };

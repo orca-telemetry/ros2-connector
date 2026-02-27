@@ -17,7 +17,7 @@ const McapFileWriter = struct {
 
     fn open(path: [:0]const u8) !McapFileWriter {
         const file = try std.fs.cwd().createFileZ(path, .{});
-        return .{ .w = mcap_mod.Writer.init(), .file = file };
+        return .{ .w = mcap_mod.Writer.init(std.hash.Crc32.init()), .file = file };
     }
 
     /// Flush the in-memory buffer to the file and clear for reuse.
@@ -59,8 +59,8 @@ const McapFileWriter = struct {
         try self.flush();
     }
 
-    fn writeDataEnd(self: *McapFileWriter, allocator: std.mem.Allocator, de: mcap_mod.DataEnd) !void {
-        try self.w.writeDataEnd(allocator, de);
+    fn writeDataEnd(self: *McapFileWriter, allocator: std.mem.Allocator) !void {
+        try self.w.writeDataEnd(allocator);
         try self.flush();
     }
 
@@ -81,6 +81,7 @@ pub const McapWriter = struct {
     topic_name: []const u8,
     type_name: []const u8,
     topic_schema: []const u8,
+    crc: std.hash.Crc32,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -98,6 +99,7 @@ pub const McapWriter = struct {
             .topic_name = topic.topic_name,
             .type_name = topic.type_name,
             .topic_schema = topic.topic_schema,
+            .crc = std.hash.Crc32.init(),
         };
     }
 
@@ -352,7 +354,7 @@ pub const McapWriterPool = struct {
 
     fn closeAndFinalize(self: *McapWriterPool, allocator: std.mem.Allocator) void {
         // Write DataEnd record
-        self.fw.writeDataEnd(allocator, .{ .data_section_crc32 = 0 }) catch |err| {
+        self.fw.writeDataEnd(allocator) catch |err| {
             std.log.err("Failed to write DataEnd: {}", .{err});
         };
 
@@ -472,6 +474,9 @@ pub fn recover(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [
 
 fn recoverImpl(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [:0]const u8) !i32 {
     // Read entire source file into memory
+    // FIXME: these files get big... not the best idea to throw it all in memory
+    // mcap is designed to be append only. this makes it streamable. recovery can
+    // be done by going back through the file
     const src_file = try std.fs.cwd().openFileZ(src_path, .{});
     defer src_file.close();
     const file_stat = try src_file.stat();
@@ -487,19 +492,29 @@ fn recoverImpl(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [
     const dst_file = try std.fs.cwd().createFileZ(dst_path, .{});
     errdefer dst_file.close();
 
+    // initialise the crc check
+    var crc = std.hash.Crc32.init();
+
     // Write leading magic
     try dst_file.writeAll(mcap_mod.MAGIC);
+
+    // capture initial crc
+    crc.update(mcap_mod.MAGIC);
 
     // Copy records from source, stopping at footer or truncation
     var offset: usize = mcap_mod.MAGIC_LEN;
     var clean: bool = true;
 
     while (offset < file_data.len) {
+        // FIXME: implementation supports inspecting bytes direct from file.
         const start = offset;
         const record = mcap_mod.Record.parseHeader(file_data, &offset) catch {
             clean = false;
             break;
         };
+
+        // write crc data
+        crc.update(file_data[start..offset]);
 
         if (record.op == .footer) break; // clean end
         if (record.op == .data_end) continue; // skip, we'll write our own
@@ -508,11 +523,11 @@ fn recoverImpl(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [
         try dst_file.writeAll(file_data[start..offset]);
     }
 
-    // Write finalization: DataEnd + Footer + trailing magic
-    var w = mcap_mod.Writer.init();
+    // Write finalisation: DataEnd + Footer + trailing magic
+    var w = mcap_mod.Writer.init(crc);
     defer w.deinit(allocator);
 
-    try w.writeDataEnd(allocator, .{ .data_section_crc32 = 0 });
+    try w.writeDataEnd(allocator);
     try w.writeFooter(allocator, .{
         .ofs_summary_section = 0,
         .ofs_summary_offset_section = 0,

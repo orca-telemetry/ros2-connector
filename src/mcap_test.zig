@@ -76,7 +76,7 @@ test "parse message" {
 ///   magic
 fn buildSyntheticMcap() ![]u8 {
     const allocator = testing.allocator;
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(null);
     defer w.deinit(allocator);
 
     try w.writeMagic(allocator);
@@ -124,8 +124,8 @@ fn buildSyntheticMcap() ![]u8 {
         });
     }
 
-    // DataEnd (no CRC for test simplicity)
-    try w.writeDataEnd(allocator, .{ .data_section_crc32 = 0 });
+    // DataEnd
+    try w.writeDataEnd(allocator);
 
     // MessageIndex (synthetic)
     var mi_entries = [_]mcap.MessageIndexEntry{
@@ -204,7 +204,7 @@ fn buildSyntheticMcap() ![]u8 {
 
     try w.writeMagic(allocator);
 
-    return w.buf.toOwnedSlice(allocator);
+    return w.buf.toOwnedSlice(testing.allocator);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,7 +277,7 @@ test "MapStrStr: two entries" {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test "Header: parse profile and library" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(null);
     defer w.deinit(testing.allocator);
     try w.writePrefixedStr(testing.allocator, "ros2");
     try w.writePrefixedStr(testing.allocator, "test-lib");
@@ -303,7 +303,7 @@ test "Footer: truncated returns error" {
 }
 
 test "Schema: parse all fields" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(null);
     defer w.deinit(testing.allocator);
     try w.writeU16(testing.allocator, 7);
     try w.writePrefixedStr(testing.allocator, "my/Schema");
@@ -319,7 +319,7 @@ test "Schema: parse all fields" {
 }
 
 test "Schema: empty data blob" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU16(testing.allocator, 1);
     try w.writePrefixedStr(testing.allocator, "Foo");
@@ -331,7 +331,7 @@ test "Schema: empty data blob" {
 
 test "Channel: parse with metadata" {
     const allocator = testing.allocator;
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU16(testing.allocator, 3);
     try w.writeU16(testing.allocator, 1);
@@ -373,7 +373,7 @@ test "Message: zero-length payload" {
 }
 
 test "Chunk: parse uncompressed chunk" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 0);
     try w.writeU64(testing.allocator, 1_000_000);
@@ -390,7 +390,7 @@ test "Chunk: parse uncompressed chunk" {
 }
 
 test "MessageIndex: parse three entries" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU16(testing.allocator, 5);
     // 3 entries × 16 bytes = 48 bytes
@@ -408,7 +408,7 @@ test "MessageIndex: parse three entries" {
 }
 
 test "ChunkIndex: parse with two channel offsets" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 0); // message_start_time
     try w.writeU64(testing.allocator, 5_000_000); // message_end_time
@@ -433,7 +433,7 @@ test "ChunkIndex: parse with two channel offsets" {
 }
 
 test "Attachment: parse with crc" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 1_000_000); // log_time
     try w.writeU64(testing.allocator, 2_000_000); // create_time
@@ -452,7 +452,7 @@ test "Attachment: parse with crc" {
 }
 
 test "AttachmentIndex: parse all fields" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 9999); // ofs_attachment
     try w.writeU64(testing.allocator, 8888); // len_attachment
@@ -468,7 +468,7 @@ test "AttachmentIndex: parse all fields" {
 }
 
 test "Statistics: parse with channel message counts" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 100); // message_count
     try w.writeU16(testing.allocator, 2); // schema_count
@@ -494,7 +494,7 @@ test "Statistics: parse with channel message counts" {
 }
 
 test "Metadata: parse name and map" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writePrefixedStr(testing.allocator, "robot_config");
     const inner = "\x04\x00\x00\x00type\x03\x00\x00\x00sim";
@@ -509,7 +509,7 @@ test "Metadata: parse name and map" {
 }
 
 test "MetadataIndex: parse" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 1111);
     try w.writeU64(testing.allocator, 2222);
@@ -622,7 +622,7 @@ test "McapIterator: decodeBody on every record" {
 /// Reserialise a parsed MCAP back to bytes by iterating records and decoding
 /// each body, then calling the appropriate mcap.Writer method.
 fn reserialise(allocator: Allocator, data: []const u8) ![]u8 {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     errdefer w.deinit(allocator);
 
     try w.writeMagic(allocator);
@@ -647,7 +647,7 @@ fn reserialise(allocator: Allocator, data: []const u8) ![]u8 {
             .metadata => |m| try w.writeMetadata(testing.allocator, m),
             .metadata_index => |mi| try w.writeMetadataIndex(testing.allocator, mi),
             .summary_offset => |so| try w.writeSummaryOffset(testing.allocator, so),
-            .data_end => |de| try w.writeDataEnd(testing.allocator, de),
+            .data_end => try w.writeDataEnd(testing.allocator),
         }
     }
 
@@ -813,11 +813,10 @@ test "round-trip: summary_offset survives" {
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Round-trip with an Attachment record
 // ─────────────────────────────────────────────────────────────────────────────
-
 test "round-trip: attachment survives" {
     const allocator = testing.allocator;
 
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
 
     try w.writeMagic(testing.allocator);
@@ -833,7 +832,7 @@ test "round-trip: attachment survives" {
         .crc32 = 0x12345678,
     });
 
-    try w.writeDataEnd(testing.allocator, .{ .data_section_crc32 = 0 });
+    try w.writeDataEnd(testing.allocator);
     try w.writeFooter(testing.allocator, .{ .ofs_summary_section = 0, .ofs_summary_offset_section = 0, .summary_crc32 = 0 });
     try w.writeMagic(testing.allocator);
 
@@ -865,7 +864,7 @@ test "round-trip: attachment survives" {
 test "round-trip: metadata with multiple keys survives" {
     const allocator = testing.allocator;
 
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
 
     try w.writeMagic(testing.allocator);
@@ -881,7 +880,7 @@ test "round-trip: metadata with multiple keys survives" {
         .metadata = .{ .entries = &entries },
     });
 
-    try w.writeDataEnd(testing.allocator, .{ .data_section_crc32 = 0 });
+    try w.writeDataEnd(testing.allocator);
     try w.writeFooter(testing.allocator, .{ .ofs_summary_section = 0, .ofs_summary_offset_section = 0, .summary_crc32 = 0 });
     try w.writeMagic(testing.allocator);
 
@@ -908,31 +907,7 @@ test "round-trip: metadata with multiple keys survives" {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. CRC-32 helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-test "crc32: known value" {
-    // CRC-32 of "123456789" = 0xCBF43926
-    const result = mcap.crc32("123456789");
-    try testing.expectEqual(@as(u32, 0xCBF43926), result);
-}
-
-test "crc32: empty input" {
-    try testing.expectEqual(@as(u32, 0x00000000), mcap.crc32(""));
-}
-
-test "crc32: deterministic" {
-    const a = mcap.crc32("hello world");
-    const b = mcap.crc32("hello world");
-    try testing.expectEqual(a, b);
-}
-
-test "crc32: different inputs differ" {
-    try testing.expect(mcap.crc32("foo") != mcap.crc32("bar"));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 9. Edge / error cases
+// 8. Edge / error cases
 // ─────────────────────────────────────────────────────────────────────────────
 
 test "McapIterator: empty data is BufferTooSmall" {
@@ -961,7 +936,7 @@ test "Statistics: truncated returns error" {
 
 test "ChunkIndex: odd-size offset table returns error" {
     const allocator = testing.allocator;
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 0);
     try w.writeU64(testing.allocator, 0);
@@ -975,7 +950,7 @@ test "ChunkIndex: odd-size offset table returns error" {
 }
 
 test "MessageIndex: odd-size records returns error" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU16(testing.allocator, 1);
     // 5 bytes – not divisible by 16
@@ -990,7 +965,7 @@ test "SummaryOffset: truncated returns error" {
 }
 
 test "Attachment: truncated before crc returns error" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writeU64(testing.allocator, 0);
     try w.writeU64(testing.allocator, 0);
@@ -1003,21 +978,21 @@ test "Attachment: truncated before crc returns error" {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 10. mcap.Writer correctness – verify record framing
+// 9. mcap.Writer correctness – verify record framing
 // ─────────────────────────────────────────────────────────────────────────────
 
 test "mcap.Writer: record has correct opcode byte" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
-    try w.writeDataEnd(testing.allocator, .{ .data_section_crc32 = 0xDEAD });
+    try w.writeDataEnd(testing.allocator);
     // Byte 0 must be the data_end opcode (0x0f)
     try testing.expectEqual(@as(u8, 0x0f), w.buf.items[0]);
 }
 
 test "mcap.Writer: record body-length field is correct" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
-    try w.writeDataEnd(testing.allocator, .{ .data_section_crc32 = 0 });
+    try w.writeDataEnd(testing.allocator);
     // Bytes 1-8: u64 LE body length, should be 4
     const body_len = std.mem.readInt(u64, w.buf.items[1..9], .little);
     try testing.expectEqual(@as(u64, 4), body_len);
@@ -1026,10 +1001,16 @@ test "mcap.Writer: record body-length field is correct" {
 }
 
 test "mcap.Writer: prefixed string length prefix is correct" {
-    var w = mcap.Writer.init();
+    var w = mcap.Writer.init(std.hash.Crc32.init());
     defer w.deinit(testing.allocator);
     try w.writePrefixedStr(testing.allocator, "zigzag");
     const len = std.mem.readInt(u32, w.buf.items[0..4], .little);
     try testing.expectEqual(@as(u32, 6), len);
     try testing.expectEqualStrings("zigzag", w.buf.items[4..]);
 }
+
+// FIXME: crc tests
+// check that:
+// 1. crc is as expected
+// 2. of data before data end is the same as the crc in the data end (data end is not account for)
+// 3. ?
