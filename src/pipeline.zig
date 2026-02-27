@@ -364,41 +364,43 @@ fn buildRos2MsgSchema(
     const type_desc = type_desc_ptr.*;
     const refs = type_desc.referenced_type_descriptions;
 
-    for (refs.data[0..refs.size]) |ref_type| {
-        const ref_name = ref_type.type_name.data[0..ref_type.type_name.size];
+    if (refs.data) |data| {
+        for (data[0..refs.size]) |ref_type| {
+            const ref_name = ref_type.type_name.data[0..ref_type.type_name.size];
 
-        // Separator
-        try writer.writeAll("=" ** 80 ++ "\n");
+            // Separator
+            try writer.writeAll("=" ** 80 ++ "\n");
 
-        // MSG: header with short name (strip /msg/, /srv/, /action/)
-        if (std.mem.indexOf(u8, ref_name, "/msg/")) |pos| {
-            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
-        } else if (std.mem.indexOf(u8, ref_name, "/srv/")) |pos| {
-            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
-        } else if (std.mem.indexOf(u8, ref_name, "/action/")) |pos| {
-            try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 8 ..] });
-        } else {
-            try writer.print("MSG: {s}\n", .{ref_name});
-        }
+            // MSG: header with short name (strip /msg/, /srv/, /action/)
+            if (std.mem.indexOf(u8, ref_name, "/msg/")) |pos| {
+                try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
+            } else if (std.mem.indexOf(u8, ref_name, "/srv/")) |pos| {
+                try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 5 ..] });
+            } else if (std.mem.indexOf(u8, ref_name, "/action/")) |pos| {
+                try writer.print("MSG: {s}/{s}\n", .{ ref_name[0..pos], ref_name[pos + 8 ..] });
+            } else {
+                try writer.print("MSG: {s}\n", .{ref_name});
+            }
 
-        // Load the referenced type's own type support to get its .msg source
-        const ref_ts = loadTypeSupport(allocator, ref_name) catch |err| {
-            std.log.warn("Could not load type support for {s}: {}", .{ ref_name, err });
-            try writer.writeAll("# source unavailable\n");
-            continue;
-        };
-        const ref_sources_ptr = ref_ts.get_type_description_sources_func.?(ref_ts);
-        const ref_sources = ref_sources_ptr.*;
-        if (ref_sources.size == 0) {
-            try writer.writeAll("# source unavailable\n");
-            continue;
-        }
-        const ref_src = ref_sources.data[0];
-        try writer.writeAll(ref_src.raw_file_contents.data[0..ref_src.raw_file_contents.size]);
-        if (ref_src.raw_file_contents.size > 0 and
-            ref_src.raw_file_contents.data[ref_src.raw_file_contents.size - 1] != '\n')
-        {
-            try writer.writeByte('\n');
+            // Load the referenced type's own type support to get its .msg source
+            const ref_ts = loadTypeSupport(allocator, ref_name) catch |err| {
+                std.log.warn("Could not load type support for {s}: {}", .{ ref_name, err });
+                try writer.writeAll("# source unavailable\n");
+                continue;
+            };
+            const ref_sources_ptr = ref_ts.get_type_description_sources_func.?(ref_ts);
+            const ref_sources = ref_sources_ptr.*;
+            if (ref_sources.size == 0) {
+                try writer.writeAll("# source unavailable\n");
+                continue;
+            }
+            const ref_src = ref_sources.data[0];
+            try writer.writeAll(ref_src.raw_file_contents.data[0..ref_src.raw_file_contents.size]);
+            if (ref_src.raw_file_contents.size > 0 and
+                ref_src.raw_file_contents.data[ref_src.raw_file_contents.size - 1] != '\n')
+            {
+                try writer.writeByte('\n');
+            }
         }
     }
 
