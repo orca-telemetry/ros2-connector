@@ -1,113 +1,126 @@
 const std = @import("std");
+const mcap_mod = @import("mcap.zig");
 const tb = @import("topic_buffer.zig");
 
 const MessageBuffer = tb.MessageBuffer;
 const MessageBufferPool = tb.MessageBufferPool;
 
 // ---------------------------------------------------------------------------
-// C++ MCAP bridge — implemented in mcap_bridge.cpp
+// McapFileWriter — wraps mcap.Writer (in-memory serializer) + std.fs.File
 // ---------------------------------------------------------------------------
-// Thin C-linkage wrapper around mcap::McapWriter.
-//
-//   void* mcap_writer_open(const char* path);
-//   void  mcap_writer_close(void* w);
-//   uint16_t mcap_writer_add_channel(void* w, const char* topic,
-//                                     const char* message_type,
-//                                     const char* schema_encoding,
-//                                     const char* schema_data);
-//   int  mcap_writer_write(void* w, uint16_t channel_id,
-//                          uint64_t log_time_ns,
-//                          const void* data, size_t len);
-//
-extern "C" fn mcap_writer_open(path: [*:0]const u8) ?*anyopaque;
-extern "C" fn mcap_writer_close(w: *anyopaque) void;
-extern "C" fn mcap_writer_add_channel(
-    w: *anyopaque,
-    topic: [*:0]const u8,
-    message_type: [*:0]const u8,
-    schema_encoding: [*:0]const u8,
-    schema_data: [*:0]const u8,
-) u16;
-extern "C" fn mcap_writer_write(
-    w: *anyopaque,
-    channel_id: u16,
-    log_time_ns: u64,
-    data: [*]const u8,
-    len: usize,
-) c_int;
-extern "C" fn mcap_writer_write_metadata(
-    w: *anyopaque,
-    name: [*:0]const u8,
-    keys: [*]const [*:0]const u8,
-    values: [*]const [*:0]const u8,
-    count: usize,
-) void;
+// Pattern: serialize a record into the Writer's ArrayList buffer, flush bytes
+// to the file, and clear the buffer for reuse.
+
+const McapFileWriter = struct {
+    w: mcap_mod.Writer,
+    file: std.fs.File,
+
+    fn open(path: [:0]const u8) !McapFileWriter {
+        const file = try std.fs.cwd().createFileZ(path, .{});
+        return .{ .w = mcap_mod.Writer.init(), .file = file };
+    }
+
+    /// Flush the in-memory buffer to the file and clear for reuse.
+    fn flush(self: *McapFileWriter) !void {
+        const items = self.w.buf.items;
+        if (items.len > 0) {
+            try self.file.writeAll(items);
+            self.w.buf.clearRetainingCapacity();
+        }
+    }
+
+    fn writeMagic(self: *McapFileWriter, allocator: std.mem.Allocator) !void {
+        try self.w.writeMagic(allocator);
+        try self.flush();
+    }
+
+    fn writeHeader(self: *McapFileWriter, allocator: std.mem.Allocator, h: mcap_mod.Header) !void {
+        try self.w.writeHeader(allocator, h);
+        try self.flush();
+    }
+
+    fn writeSchema(self: *McapFileWriter, allocator: std.mem.Allocator, s: mcap_mod.Schema) !void {
+        try self.w.writeSchema(allocator, s);
+        try self.flush();
+    }
+
+    fn writeChannel(self: *McapFileWriter, allocator: std.mem.Allocator, c: mcap_mod.Channel) !void {
+        try self.w.writeChannel(allocator, c);
+        try self.flush();
+    }
+
+    fn writeMessage(self: *McapFileWriter, allocator: std.mem.Allocator, m: mcap_mod.Message) !void {
+        try self.w.writeMessage(allocator, m);
+        try self.flush();
+    }
+
+    fn writeMetadata(self: *McapFileWriter, allocator: std.mem.Allocator, m: mcap_mod.Metadata) !void {
+        try self.w.writeMetadata(allocator, m);
+        try self.flush();
+    }
+
+    fn writeDataEnd(self: *McapFileWriter, allocator: std.mem.Allocator, de: mcap_mod.DataEnd) !void {
+        try self.w.writeDataEnd(allocator, de);
+        try self.flush();
+    }
+
+    fn writeFooter(self: *McapFileWriter, allocator: std.mem.Allocator, f: mcap_mod.Footer) !void {
+        try self.w.writeFooter(allocator, f);
+        try self.flush();
+    }
+};
 
 // ---------------------------------------------------------------------------
-// McapWriter — one writer per topic (one channel in the MCAP file)
+// McapWriter — one writer per topic (one schema + channel in the MCAP file)
 // ---------------------------------------------------------------------------
 
 pub const McapWriter = struct {
-    handle: *anyopaque,
     channel_id: u16,
-    topic_name: [*:0]const u8,
-    type_name: [*:0]const u8,
-    topic_schema: [*:0]const u8,
+    schema_id: u16,
+    sequence: u32,
+    topic_name: []const u8,
+    type_name: []const u8,
+    topic_schema: []const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        handle: *anyopaque,
+        fw: *McapFileWriter,
         topic: *const MessageBuffer,
+        schema_id: u16,
+        channel_id: u16,
     ) !McapWriter {
-        const topic_z = try allocator.dupeZ(u8, topic.topic_name);
-        const type_z = try allocator.dupeZ(u8, topic.type_name);
-        const schema_z = try allocator.dupeZ(u8, topic.topic_schema);
-
-        const channel_id = mcap_writer_add_channel(
-            handle,
-            topic_z.ptr,
-            type_z.ptr,
-            "ros2msg", // only support ros2msg for now
-            schema_z.ptr,
-        );
+        try writeSchemaAndChannel(fw, allocator, topic.type_name, topic.topic_name, topic.topic_schema, schema_id, channel_id);
 
         return .{
-            .handle = handle,
             .channel_id = channel_id,
-            .topic_name = topic_z.ptr,
-            .type_name = type_z.ptr,
-            .topic_schema = schema_z.ptr,
+            .schema_id = schema_id,
+            .sequence = 0,
+            .topic_name = topic.topic_name,
+            .type_name = topic.type_name,
+            .topic_schema = topic.topic_schema,
         };
     }
 
-    /// Re-register this writer's channel on a new MCAP handle after rotation.
-    pub fn reregister(self: *McapWriter, new_handle: *anyopaque) void {
-        self.handle = new_handle;
-        self.channel_id = mcap_writer_add_channel(
-            new_handle,
-            self.topic_name,
-            self.type_name,
-            "ros2msg",
-            self.topic_schema,
-        );
+    /// Re-register this writer's schema + channel on a new file after rotation.
+    pub fn reregister(self: *McapWriter, allocator: std.mem.Allocator, fw: *McapFileWriter) !void {
+        try writeSchemaAndChannel(fw, allocator, self.type_name, self.topic_name, self.topic_schema, self.schema_id, self.channel_id);
     }
 
     /// Write a single serialized message to the MCAP file.
-    pub fn writeMessage(self: *McapWriter, log_time_ns: u64, data: []const u8) !void {
-        if (mcap_writer_write(
-            self.handle,
-            self.channel_id,
-            log_time_ns,
-            data.ptr,
-            data.len,
-        ) != 0) {
-            return error.McapWriteFailed;
-        }
+    pub fn writeMessage(self: *McapWriter, fw: *McapFileWriter, allocator: std.mem.Allocator, log_time_ns: u64, data: []const u8) !void {
+        self.sequence += 1;
+        try fw.writeMessage(allocator, .{
+            .channel_id = self.channel_id,
+            .sequence = self.sequence,
+            .log_time = log_time_ns,
+            .publish_time = log_time_ns,
+            .data = data,
+        });
     }
 
     /// Drain all messages from the buffer and write each as a separate MCAP message.
     /// Returns the total bytes written.
-    pub fn flush(self: *McapWriter, buf: *MessageBuffer, allocator: std.mem.Allocator) !u64 {
+    pub fn flush(self: *McapWriter, fw: *McapFileWriter, buf: *MessageBuffer, allocator: std.mem.Allocator) !u64 {
         const messages = buf.drainAll(allocator);
         if (messages.len == 0) return 0;
         defer allocator.free(messages);
@@ -115,19 +128,45 @@ pub const McapWriter = struct {
         var bytes: u64 = 0;
         for (messages) |msg| {
             defer allocator.free(msg.data);
-            try self.writeMessage(msg.timestamp_ns, msg.data);
+            try self.writeMessage(fw, allocator, msg.timestamp_ns, msg.data);
             bytes += msg.data.len;
         }
         return bytes;
     }
 };
 
+fn writeSchemaAndChannel(
+    fw: *McapFileWriter,
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    topic_name: []const u8,
+    topic_schema: []const u8,
+    schema_id: u16,
+    channel_id: u16,
+) !void {
+    try fw.writeSchema(allocator, .{
+        .id = schema_id,
+        .name = .{ .str = type_name },
+        .encoding = .{ .str = "ros2msg" },
+        .data = topic_schema,
+    });
+
+    var empty_entries = [_]mcap_mod.TupleStrStr{};
+    try fw.writeChannel(allocator, .{
+        .id = channel_id,
+        .schema_id = schema_id,
+        .topic = .{ .str = topic_name },
+        .message_encoding = .{ .str = "cdr" },
+        .metadata = .{ .entries = &empty_entries },
+    });
+}
+
 // ---------------------------------------------------------------------------
 // McapWriterPool — one shared MCAP file, one McapWriter per topic
 // ---------------------------------------------------------------------------
 
 pub const McapWriterPool = struct {
-    handle: *anyopaque,
+    fw: McapFileWriter,
     writers: []McapWriter,
     file_path: [:0]const u8,
     incomplete_path: [:0]const u8,
@@ -163,19 +202,29 @@ pub const McapWriterPool = struct {
         );
 
         // Open with .incomplete suffix
-        const handle = mcap_writer_open(incomplete.ptr) orelse return error.McapOpenFailed;
-        errdefer mcap_writer_close(handle);
+        var fw = try McapFileWriter.open(incomplete);
+        errdefer {
+            fw.file.close();
+            fw.w.deinit(allocator);
+        }
 
-        // Write session metadata
-        writeSessionMetadata(allocator, handle, robot_id, software_version, now_ns, 0);
+        // Write file preamble: magic + header + session metadata
+        try fw.writeMagic(allocator);
+        try fw.writeHeader(allocator, .{
+            .profile = .{ .str = "ros2" },
+            .library = .{ .str = "orca-collector" },
+        });
+        writeSessionMetadata(allocator, &fw, robot_id, software_version, now_ns, 0);
 
+        // Register one schema + channel per topic
         const writers = try allocator.alloc(McapWriter, buf_pool.buffers.len);
         for (buf_pool.buffers, 0..) |*buf, i| {
-            writers[i] = try McapWriter.init(allocator, handle, buf);
+            const id: u16 = @intCast(i + 1); // 1-indexed
+            writers[i] = try McapWriter.init(allocator, &fw, buf, id, id);
         }
 
         return .{
-            .handle = handle,
+            .fw = fw,
             .writers = writers,
             .file_path = filename,
             .incomplete_path = incomplete,
@@ -195,7 +244,7 @@ pub const McapWriterPool = struct {
     pub fn flushAll(self: *McapWriterPool, buf_pool: *MessageBufferPool, allocator: std.mem.Allocator) !void {
         for (self.writers, buf_pool.buffers) |*writer, *buf| {
             if (buf.needsFlush()) {
-                const bytes = try writer.flush(buf, allocator);
+                const bytes = try writer.flush(&self.fw, buf, allocator);
                 self.bytes_written += bytes;
             }
         }
@@ -205,7 +254,7 @@ pub const McapWriterPool = struct {
     pub fn forceFlushAll(self: *McapWriterPool, buf_pool: *MessageBufferPool, allocator: std.mem.Allocator) !void {
         for (self.writers, buf_pool.buffers) |*writer, *buf| {
             if (buf.len() > 0) {
-                const bytes = try writer.flush(buf, allocator);
+                const bytes = try writer.flush(&self.fw, buf, allocator);
                 self.bytes_written += bytes;
             }
         }
@@ -242,18 +291,28 @@ pub const McapWriterPool = struct {
             0,
         );
 
-        const new_handle = mcap_writer_open(new_incomplete.ptr) orelse
-            return error.McapOpenFailed;
+        // Open new file (reuse the Writer buffer)
+        self.fw.file = try std.fs.cwd().createFileZ(new_incomplete, .{});
 
-        // Write session metadata for the new file
-        writeSessionMetadata(allocator, new_handle, self.robot_id, self.software_version, now_ns, self.sequence);
+        // Write file preamble
+        self.fw.writeMagic(allocator) catch |err| {
+            std.log.err("Failed to write magic after rotation: {}", .{err});
+            return err;
+        };
+        self.fw.writeHeader(allocator, .{
+            .profile = .{ .str = "ros2" },
+            .library = .{ .str = "orca-collector" },
+        }) catch |err| {
+            std.log.err("Failed to write header after rotation: {}", .{err});
+            return err;
+        };
+        writeSessionMetadata(allocator, &self.fw, self.robot_id, self.software_version, now_ns, self.sequence);
 
-        // Re-register all channels on the new handle
+        // Re-register all channels on the new file
         for (self.writers) |*writer| {
-            writer.reregister(new_handle);
+            try writer.reregister(allocator, &self.fw);
         }
 
-        self.handle = new_handle;
         self.file_path = new_filename;
         self.incomplete_path = new_incomplete;
         self.bytes_written = 0;
@@ -279,14 +338,9 @@ pub const McapWriterPool = struct {
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
         if (now_ns - self.last_fsync_ns < self.fsync_interval_ns) return;
 
-        if (std.fs.cwd().openFileZ(self.incomplete_path, .{})) |file| {
-            file.sync() catch |err| {
-                std.log.err("periodic fsync failed for {s}: {}", .{ self.incomplete_path, err });
-            };
-            file.close();
-        } else |err| {
-            std.log.err("periodic fsync: failed to open {s}: {}", .{ self.incomplete_path, err });
-        }
+        self.fw.file.sync() catch |err| {
+            std.log.err("periodic fsync failed: {}", .{err});
+        };
 
         self.last_fsync_ns = now_ns;
     }
@@ -297,17 +351,56 @@ pub const McapWriterPool = struct {
     }
 
     fn closeAndFinalize(self: *McapWriterPool, allocator: std.mem.Allocator) void {
-        mcap_writer_close(self.handle);
+        // Write DataEnd record
+        self.fw.writeDataEnd(allocator, .{ .data_section_crc32 = 0 }) catch |err| {
+            std.log.err("Failed to write DataEnd: {}", .{err});
+        };
 
-        // Re-open the .incomplete file and fsync to ensure data is on disk
-        if (std.fs.cwd().openFileZ(self.incomplete_path, .{})) |file| {
-            file.sync() catch |err| {
-                std.log.err("fsync failed for {s}: {}", .{ self.incomplete_path, err });
+        // --- Summary section: re-emit Schema + Channel for each topic ---
+        const summary_start: u64 = self.fw.file.getPos() catch 0;
+
+        for (self.writers) |writer| {
+            self.fw.writeSchema(allocator, .{
+                .id = writer.schema_id,
+                .name = .{ .str = writer.type_name },
+                .encoding = .{ .str = "ros2msg" },
+                .data = writer.topic_schema,
+            }) catch |err| {
+                std.log.err("Failed to write summary Schema: {}", .{err});
             };
-            file.close();
-        } else |err| {
-            std.log.err("Failed to re-open for fsync {s}: {}", .{ self.incomplete_path, err });
         }
+
+        for (self.writers) |writer| {
+            var empty_entries = [_]mcap_mod.TupleStrStr{};
+            self.fw.writeChannel(allocator, .{
+                .id = writer.channel_id,
+                .schema_id = writer.schema_id,
+                .topic = .{ .str = writer.topic_name },
+                .message_encoding = .{ .str = "cdr" },
+                .metadata = .{ .entries = &empty_entries },
+            }) catch |err| {
+                std.log.err("Failed to write summary Channel: {}", .{err});
+            };
+        }
+
+        // Write Footer with summary offset
+        self.fw.writeFooter(allocator, .{
+            .ofs_summary_section = summary_start,
+            .ofs_summary_offset_section = 0,
+            .summary_crc32 = 0,
+        }) catch |err| {
+            std.log.err("Failed to write Footer: {}", .{err});
+        };
+        // Write trailing magic
+        self.fw.writeMagic(allocator) catch |err| {
+            std.log.err("Failed to write trailing magic: {}", .{err});
+        };
+
+        // Fsync and close
+        self.fw.file.sync() catch |err| {
+            std.log.err("fsync failed for {s}: {}", .{ self.incomplete_path, err });
+        };
+        self.fw.file.close();
 
         // Rename .incomplete → final .mcap
         std.fs.cwd().renameZ(self.incomplete_path, self.file_path) catch |err| {
@@ -325,6 +418,114 @@ pub const McapWriterPool = struct {
         };
     }
 };
+
+// ---------------------------------------------------------------------------
+// Session metadata — written to each MCAP file on open
+// ---------------------------------------------------------------------------
+
+fn writeSessionMetadata(
+    allocator: std.mem.Allocator,
+    fw: *McapFileWriter,
+    robot_id: []const u8,
+    software_version: []const u8,
+    session_ns: u64,
+    sequence: u32,
+) void {
+    writeSessionMetadataImpl(allocator, fw, robot_id, software_version, session_ns, sequence) catch |err| {
+        std.log.err("Failed to write session metadata: {}", .{err});
+    };
+}
+
+fn writeSessionMetadataImpl(
+    allocator: std.mem.Allocator,
+    fw: *McapFileWriter,
+    robot_id: []const u8,
+    software_version: []const u8,
+    session_ns: u64,
+    sequence: u32,
+) !void {
+    const session_id_str = try std.fmt.allocPrint(allocator, "{d}", .{session_ns});
+    const seq_str = try std.fmt.allocPrint(allocator, "{d}", .{sequence});
+
+    var entries = [_]mcap_mod.TupleStrStr{
+        .{ .key = .{ .str = "robot_id" }, .value = .{ .str = robot_id } },
+        .{ .key = .{ .str = "session_id" }, .value = .{ .str = session_id_str } },
+        .{ .key = .{ .str = "software_version" }, .value = .{ .str = software_version } },
+        .{ .key = .{ .str = "file_sequence" }, .value = .{ .str = seq_str } },
+    };
+
+    try fw.writeMetadata(allocator, .{
+        .name = .{ .str = "rdl_session" },
+        .metadata = .{ .entries = &entries },
+    });
+}
+
+// ---------------------------------------------------------------------------
+// MCAP file recovery — replaces C++ mcap_recover
+// ---------------------------------------------------------------------------
+
+/// Recover an incomplete MCAP file by copying valid records to a new file.
+/// Returns 0 for clean recovery, 1 for partial (some data lost), -1 for failure.
+pub fn recover(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [:0]const u8) i32 {
+    return recoverImpl(allocator, src_path, dst_path) catch -1;
+}
+
+fn recoverImpl(allocator: std.mem.Allocator, src_path: [:0]const u8, dst_path: [:0]const u8) !i32 {
+    // Read entire source file into memory
+    const src_file = try std.fs.cwd().openFileZ(src_path, .{});
+    defer src_file.close();
+    const file_stat = try src_file.stat();
+    const data = try allocator.alloc(u8, file_stat.size);
+    defer allocator.free(data);
+    const bytes_read = try src_file.readAll(data);
+    const file_data = data[0..bytes_read];
+
+    // Validate leading magic
+    mcap_mod.validateMagic(file_data) catch return -1;
+
+    // Open destination file
+    const dst_file = try std.fs.cwd().createFileZ(dst_path, .{});
+    errdefer dst_file.close();
+
+    // Write leading magic
+    try dst_file.writeAll(mcap_mod.MAGIC);
+
+    // Copy records from source, stopping at footer or truncation
+    var offset: usize = mcap_mod.MAGIC_LEN;
+    var clean: bool = true;
+
+    while (offset < file_data.len) {
+        const start = offset;
+        const record = mcap_mod.Record.parseHeader(file_data, &offset) catch {
+            clean = false;
+            break;
+        };
+
+        if (record.op == .footer) break; // clean end
+        if (record.op == .data_end) continue; // skip, we'll write our own
+
+        // Write the raw record bytes (opcode + length + body) directly
+        try dst_file.writeAll(file_data[start..offset]);
+    }
+
+    // Write finalization: DataEnd + Footer + trailing magic
+    var w = mcap_mod.Writer.init();
+    defer w.deinit(allocator);
+
+    try w.writeDataEnd(allocator, .{ .data_section_crc32 = 0 });
+    try w.writeFooter(allocator, .{
+        .ofs_summary_section = 0,
+        .ofs_summary_offset_section = 0,
+        .summary_crc32 = 0,
+    });
+    try w.writeMagic(allocator);
+    try dst_file.writeAll(w.buf.items);
+
+    try dst_file.sync();
+    dst_file.close();
+
+    return if (clean) @as(i32, 0) else @as(i32, 1);
+}
 
 // ---------------------------------------------------------------------------
 // ISO8601-ish timestamp formatting and filename generation
@@ -368,30 +569,6 @@ fn generateFilename(
         .{ out_dir, robot_id, ts, sequence },
         0,
     );
-}
-
-// ---------------------------------------------------------------------------
-// Session metadata — written to each MCAP file on open
-// ---------------------------------------------------------------------------
-
-fn writeSessionMetadata(
-    allocator: std.mem.Allocator,
-    handle: *anyopaque,
-    robot_id: []const u8,
-    software_version: []const u8,
-    session_ns: u64,
-    sequence: u32,
-) void {
-    // Format session_id and file_sequence as null-terminated strings
-    const session_id_z = std.fmt.allocPrintSentinel(allocator, "{d}", .{session_ns}, 0) catch return;
-    const seq_z = std.fmt.allocPrintSentinel(allocator, "{d}", .{sequence}, 0) catch return;
-    const robot_id_z = allocator.dupeZ(u8, robot_id) catch return;
-    const version_z = allocator.dupeZ(u8, software_version) catch return;
-
-    const keys = [_][*:0]const u8{ "robot_id", "session_id", "software_version", "file_sequence" };
-    const values = [_][*:0]const u8{ robot_id_z.ptr, session_id_z.ptr, version_z.ptr, seq_z.ptr };
-
-    mcap_writer_write_metadata(handle, "rdl_session", &keys, &values, keys.len);
 }
 
 // ---------------------------------------------------------------------------

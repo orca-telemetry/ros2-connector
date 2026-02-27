@@ -794,7 +794,6 @@ pub const Writer = struct {
     }
 
     // ── typed record writers ─────────────────────────────────────────────────
-
     pub fn writeHeader(self: *Writer, allocator: std.mem.Allocator, h: Header) !void {
         var b = Writer.init();
         defer b.deinit(allocator);

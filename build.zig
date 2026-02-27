@@ -14,32 +14,6 @@ pub fn build(b: *std.Build) void {
     const ros_include_path = b.fmt("{s}/include", .{ros_root});
     const ros_lib_path = b.fmt("{s}/lib", .{ros_root});
 
-    // --- MCAP C++ bridge (compiled with system g++ to match libstdc++ ABI) ----
-    const compile_bridge = b.addSystemCommand(&.{
-        "g++", "-shared", "-fPIC",
-    });
-    if (is_release) {
-        compile_bridge.addArgs(&.{ "-Os", "-ffunction-sections", "-fdata-sections" });
-    } else {
-        compile_bridge.addArg("-O2");
-    }
-    compile_bridge.addArgs(&.{ "-I", b.fmt("{s}/include/mcap_vendor", .{ros_root}), "-L", ros_lib_path, "-o" });
-    const bridge_so = compile_bridge.addOutputFileArg("libmcap_bridge.so");
-    compile_bridge.addFileArg(b.path("src/mcap_bridge.cpp"));
-    compile_bridge.addArg("-lmcap");
-    compile_bridge.addArg(b.fmt("-Wl,-rpath,{s}", .{ros_lib_path}));
-    if (is_release) {
-        compile_bridge.addArg("-Wl,--gc-sections");
-        compile_bridge.addArg("-s");
-    }
-
-    // Install bridge .so alongside the binary
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        bridge_so,
-        .bin,
-        "libmcap_bridge.so",
-    ).step);
-
     // --- Main executable ----------------------------------------------------------
     const exe = b.addExecutable(.{
         .name = "orca",
@@ -92,10 +66,6 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary(lib, .{});
     }
 
-    // Link MCAP bridge shared library; rpath=$ORIGIN so it finds libmcap_bridge.so next to binary
-    exe.root_module.addObjectFile(bridge_so);
-    exe.root_module.addRPath(.{ .cwd_relative = "$ORIGIN" });
-
     b.installArtifact(exe);
 
     // --- Check Step (For ZLS Diagnostics) -----------------------------
@@ -133,10 +103,6 @@ pub fn build(b: *std.Build) void {
         inline for (ros_libs) |lib| {
             test_mod.linkSystemLibrary(lib, .{});
         }
-
-        // Link MCAP bridge shared library
-        test_mod.addObjectFile(bridge_so);
-        test_mod.addRPath(.{ .cwd_relative = "$ORIGIN" });
 
         const unit_tests = b.addTest(.{
             .root_module = test_mod,

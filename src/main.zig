@@ -7,7 +7,6 @@ const provision = @import("configure/provision.zig");
 const discovery = @import("configure/discovery.zig");
 const sync = @import("configure/sync.zig");
 
-extern "C" fn mcap_recover(src: [*:0]const u8, dst: [*:0]const u8) c_int;
 
 // ---------------------------------------------------------------------------
 // Signal handling — graceful shutdown on SIGINT / SIGTERM
@@ -214,7 +213,7 @@ fn recoverIncompleteFiles(allocator: std.mem.Allocator, log_dir: []const u8) voi
 
         std.log.info("Recovering incomplete file: {s}", .{entry.name});
 
-        const result = mcap_recover(incomplete_path.ptr, tmp_path.ptr);
+        const result = mcap.recover(allocator, incomplete_path, tmp_path);
         if (result >= 0) {
             // Success (0 = clean, 1 = partial but usable)
             if (result == 1) {
