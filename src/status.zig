@@ -184,6 +184,7 @@ pub const StatusReporter = struct {
         defer response_body.deinit();
 
         const url = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ constants.status_base_url, self.robot_id });
+        log.info("{s}", .{url});
         defer allocator.free(url);
 
         const result = try client.fetch(.{
