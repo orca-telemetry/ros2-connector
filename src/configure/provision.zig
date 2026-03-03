@@ -105,7 +105,7 @@ fn uploadPublicKey(allocator: std.mem.Allocator, dir: std.fs.Dir, token: []const
 
     // 6. Handle Response
     if (result.status != .ok) {
-        std.debug.print("MotherApp upload failed with status: {d}\n", .{result.status});
+        std.debug.print("Orca upload failed with status: {d}\n", .{result.status});
         return error.UploadFailed;
     }
 
