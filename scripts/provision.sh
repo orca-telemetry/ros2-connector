@@ -36,8 +36,20 @@ curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
 chmod +x "$TARGET_PATH"
 
 # 3. Provision
+FORCE_FLAG=""
+if [[ -f "$HOME/.orca/id_ed25519" ]]; then
+    echo "Existing keypair detected." >&2
+    read -rp "Overwrite existing keys? This will re-provision the robot. [y/N] " answer
+    if [[ "${answer,,}" == "y" ]]; then
+        FORCE_FLAG="--force"
+    else
+        echo "Aborted." >&2
+        exit 0
+    fi
+fi
+
 echo "Starting provision step..."
-if ! "$TARGET_PATH" provision --token "$TOKEN"; then
+if ! "$TARGET_PATH" provision -t "$TOKEN" $FORCE_FLAG; then
     echo "Error: Provisioning failed with exit code $?" >&2
     exit 1
 fi

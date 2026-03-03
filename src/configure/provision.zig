@@ -8,13 +8,10 @@ const ProvisionPayload = struct {
     publicKey: []const u8,
 };
 
-pub fn provisionRobot(allocator: std.mem.Allocator, token: []const u8) !void {
+pub fn provisionRobot(allocator: std.mem.Allocator, token: []const u8, force: bool) !void {
     std.debug.print("Starting provisioning with token: {s}\n", .{token});
 
-    // 1. generate Ed25519 Keypair
-    const kp = crypto.sign.Ed25519.KeyPair.generate();
-
-    // 2. prepare Storage
+    // 1. prepare Storage
     const path = try config.ConfigStorage.getStoragePath(allocator);
     defer allocator.free(path);
     std.fs.makeDirAbsolute(path) catch |err| switch (err) {
@@ -25,16 +22,29 @@ pub fn provisionRobot(allocator: std.mem.Allocator, token: []const u8) !void {
     var dir = try std.fs.openDirAbsolute(path, .{});
     defer dir.close();
 
-    // 3. save Private Key as hex (Restrict permissions: 600)
+    // 2. check for existing keys
+    const keys_exist = blk: {
+        dir.access(config.ConfigStorage.priv_key_file, .{}) catch break :blk false;
+        break :blk true;
+    };
+
+    if (keys_exist and !force) {
+        std.debug.print("Error: keypair already exists at {s}. Use --force to overwrite.\n", .{path});
+        return error.KeysAlreadyExist;
+    }
+
+    // 3. generate Ed25519 Keypair
+    const kp = crypto.sign.Ed25519.KeyPair.generate();
+
+    // 4. save Private Key as hex (Restrict permissions: 600)
     const priv_hex = std.fmt.bytesToHex(&kp.secret_key.bytes, .lower);
-    // will throw error if file exists
-    const priv_file = try dir.createFile(config.ConfigStorage.priv_key_file, .{ .mode = 0o600, .exclusive = true });
+    const priv_file = try dir.createFile(config.ConfigStorage.priv_key_file, .{ .mode = 0o600 });
     try priv_file.writeAll(&priv_hex);
     priv_file.close();
 
-    // 4. save Public Key as hex
+    // 5. save Public Key as hex
     const pub_hex = std.fmt.bytesToHex(&kp.public_key.bytes, .lower);
-    const pub_file = try dir.createFile(config.ConfigStorage.pub_key_file, .{ .exclusive = true });
+    const pub_file = try dir.createFile(config.ConfigStorage.pub_key_file, .{});
     try pub_file.writeAll(&pub_hex);
     pub_file.close();
 

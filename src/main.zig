@@ -51,11 +51,22 @@ pub fn main() !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "provision")) {
-        if (args.len < 4 or !std.mem.eql(u8, args[2], "--token")) {
+        var token: ?[]const u8 = null;
+        var force = false;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--token") or std.mem.eql(u8, args[i], "-t")) {
+                i += 1;
+                if (i < args.len) token = args[i];
+            } else if (std.mem.eql(u8, args[i], "--force")) {
+                force = true;
+            }
+        }
+        if (token == null) {
             std.debug.print("Error: provision requires --token <value>\n", .{});
             return;
         }
-        try provision.provisionRobot(allocator, args[3]);
+        try provision.provisionRobot(allocator, token.?, force);
     } else if (std.mem.eql(u8, command, "discover")) {
         // Initialize RCL
         var context = c.rcl_get_zero_initialized_context();
