@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+# --- Configuration (TOKEN is templated by the server) ---
+TOKEN="{{TOKEN}}"
+BINARY_URL="https://github.com/orca-telemetry/ros2-connector/releases/download/v0.0.0/orca"
+BINARY_NAME="orca"
+INSTALL_DIR="$HOME/.local/bin"
+SERVICE_NAME="orca-listen"
+mkdir -p "$INSTALL_DIR"
+
+set -euo pipefail
+
+# 1. Determine ROS version + Source setup
+if [[ -z "${ROS_DISTRO:-}" ]]; then
+    echo "Scanning for ROS 2 installation..." >&2
+    for _d in /opt/ros/jazzy /opt/ros/humble /opt/ros/rolling; do
+        if [[ -f "${_d}/setup.bash" ]]; then
+            set +u
+            source "${_d}/setup.bash"
+            set -u
+            echo "Sourced ${_d}" >&2
+            brea-token
+        fi
+    done
+fi
+
+if [[ -z "${ROS_VERSION:-}" ]]; then
+    echo "Error: ROS 2 environment not detected. Please install ROS 2 or source it manually." >&2
+    exit 1
+fi
+
+# 2. Download the binary (always fetch latest)
+TARGET_PATH="${INSTALL_DIR}/${BINARY_NAME}"
+echo "Downloading ${BINARY_NAME}..." >&2
+curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
+chmod +x "$TARGET_PATH"
+
+# 3. Provision
+echo "Starting provision step..."
+if ! "$TARGET_PATH" provision --token "$TOKEN"; then
+    echo "Error: Provisioning failed with exit code $?" >&2
+    exit 1
+fi
+
+# 4. Discover
+echo "Starting discovery step..."
+if ! "$TARGET_PATH" discover; then
+    echo "Error: Discovery failed with exit code $?" >&2
+    exit 1
+fi
+
+# 5. Sync (retry every 5 seconds until success)
+echo "Starting sync step..."
+until "$TARGET_PATH" sync; do
+    echo "Sync not ready, retrying in 5 seconds..." >&2
+    sleep 5
+done
+
+# 6. Install and start systemd service for `orca listen`
+echo "Setting up systemd service..."
+
+UNIT_DIR="$HOME/.config/systemd/user"
+mkdir -p "$UNIT_DIR"
+
+cat > "${UNIT_DIR}/${SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=Orca ROS 2 Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${TARGET_PATH} listen
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now "${SERVICE_NAME}.service"
+
+echo "Robot onboarded with Orca. Service '${SERVICE_NAME}' is running."
