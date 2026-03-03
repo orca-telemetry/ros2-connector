@@ -39,7 +39,7 @@ chmod +x "$TARGET_PATH"
 FORCE_FLAG=""
 if [[ -f "$HOME/.orca/id_ed25519" ]]; then
     echo "Existing keypair detected." >&2
-    read -rp "Overwrite existing keys? This will re-provision the robot. [y/N] " answer
+    read -rp "Overwrite existing keys? This will re-provision the robot. [y/N] " answer </dev/tty
     if [[ "${answer,,}" == "y" ]]; then
         FORCE_FLAG="--force"
     else
