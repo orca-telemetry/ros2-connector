@@ -19,7 +19,7 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
             source "${_d}/setup.bash"
             set -u
             echo "Sourced ${_d}" >&2
-            brea-token
+            break
         fi
     done
 fi
