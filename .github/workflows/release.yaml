@@ -20,12 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Zig installation
+        id: cache-zig
+        uses: actions/cache@v4
+        with:
+          path: ~/.zig
+          key: zig-0.15.2-${{ matrix.suffix }}
+
       - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: 0.15.2
+
+      - name: Add Zig to PATH (cache restore)
+        if: steps.cache-zig.outputs.cache-hit == 'true'
+        run: echo "$HOME/.zig" >> $GITHUB_PATH
+
+      - name: Cache ROS Jazzy
+        id: cache-ros
+        uses: actions/cache@v4
+        with:
+          path: /opt/ros/jazzy
+          key: ros-jazzy-${{ matrix.suffix }}-${{ hashFiles('.github/workflows/release.yml') }}
 
       - name: Install ROS Jazzy
+        if: steps.cache-ros.outputs.cache-hit != 'true'
         run: |
           sudo apt-get install -y software-properties-common curl
           sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
@@ -35,6 +55,16 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/ros2.list
           sudo apt-get update
           sudo apt-get install -y ros-jazzy-ros-base
+
+      - name: Cache Zig build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: zig-build-${{ matrix.suffix }}-${{ hashFiles('src/**/*.zig', 'build.zig') }}
+          restore-keys: |
+            zig-build-${{ matrix.suffix }}-
 
       - name: Build
         run: zig build --release
