@@ -102,7 +102,7 @@ fn loadTypeSupport(
     const sym = std.c.dlsym(handle, func_name.ptr) orelse
         return error.TypeSupportSymNotFound;
 
-    const get_ts: *const fn () callconv(.c) *const c.rosidl_message_type_support_t = @ptrCast(sym);
+    const get_ts: *const fn () callconv(.c) *const c.rosidl_message_type_support_t = @ptrCast(@alignCast(sym));
     return get_ts();
 }
 
