@@ -82,6 +82,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=LD_LIBRARY_PATH=/opt/ros/jazzy/lib
 ExecStart=${TARGET_PATH} listen
 Restart=on-failure
 RestartSec=5
