@@ -12,6 +12,8 @@ pub const Config = struct {
     min_free_disk_mb: u32 = 500,
     fsync_interval_s: u32 = 5,
     status_interval_s: u32 = 30,
+    bucket_url: []const u8 = "",
+    bucket_token: []const u8 = "",
     topics: []const TopicEntry,
 
     pub const TopicEntry = struct {
@@ -37,29 +39,36 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(Con
 /// so the caller must keep both alive.
 pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     var result = cfg;
-    if (std.posix.getenv("RDL_ROBOT_ID")) |val| {
+    if (std.posix.getenv("ORCA_ROBOT_ID")) |val| {
         result.robot_id = val;
     }
-    if (std.posix.getenv("RDL_LOG_DIRECTORY")) |val| {
+    if (std.posix.getenv("ORCA_LOG_DIRECTORY")) |val| {
         result.log_directory = val;
     }
-    if (std.posix.getenv("RDL_DISK_USAGE_LIMIT_PCT")) |val| {
+    if (std.posix.getenv("ORCA_DISK_USAGE_LIMIT_PCT")) |val| {
         result.disk_usage_limit_pct = std.fmt.parseInt(u32, val, 10) catch result.disk_usage_limit_pct;
     }
-    if (std.posix.getenv("RDL_MIN_FREE_DISK_MB")) |val| {
+    if (std.posix.getenv("ORCA_MIN_FREE_DISK_MB")) |val| {
         result.min_free_disk_mb = std.fmt.parseInt(u32, val, 10) catch result.min_free_disk_mb;
     }
-    if (std.posix.getenv("RDL_FSYNC_INTERVAL_S")) |val| {
+    if (std.posix.getenv("ORCA_FSYNC_INTERVAL_S")) |val| {
         result.fsync_interval_s = std.fmt.parseInt(u32, val, 10) catch result.fsync_interval_s;
     }
-    if (std.posix.getenv("RDL_STATUS_INTERVAL_S")) |val| {
+    if (std.posix.getenv("ORCA_STATUS_INTERVAL_S")) |val| {
         result.status_interval_s = std.fmt.parseInt(u32, val, 10) catch result.status_interval_s;
     }
+    if (std.posix.getenv("ORCA_BUCKET_URL")) |val| {
+        result.bucket_url = val;
+    }
+    if (std.posix.getenv("ORCA_BUCKET_TOKEN")) |val| {
+        result.bucket_token = val;
+    }
 
-    // If log_directory is still empty (default), resolve to ~/.orca/logs
+    // if log_directory is still empty (default), resolve to ~/.orca/logs
     if (result.log_directory.len == 0) {
         const home = std.posix.getenv("HOME") orelse "/tmp";
         result.log_directory = try std.fs.path.join(allocator, &.{ home, ".orca", "logs" });
+        defer allocator.free(result.log_directory);
     }
 
     return result;
