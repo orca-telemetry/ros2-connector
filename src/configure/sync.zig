@@ -65,13 +65,19 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
 
     const body = response_body.written();
 
-    // Parse response — array of topic objects with "name" and "type_name"
+    // parse response - top-level object with topics array and optional bucket config
     const RemoteTopic = struct {
         name: []const u8,
         type_name: []const u8,
     };
 
-    const parsed = std.json.parseFromSlice([]const RemoteTopic, allocator, body, .{
+    const SyncResponse = struct {
+        topics: []const RemoteTopic = &.{},
+        bucket_url: []const u8 = "",
+        bucket_token: []const u8 = "",
+    };
+
+    const parsed = std.json.parseFromSlice(SyncResponse, allocator, body, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
         std.debug.print("Error: failed to parse sync response: {}\n", .{err});
@@ -79,21 +85,16 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     };
     defer parsed.deinit();
 
-    if (parsed.value.len == 0) {
-        std.debug.print("Error: server returned no topics\n", .{});
-        return error.NoTopics;
-    }
-
-    // Load existing config (or use defaults) and update topics
+    // load existing config (or use defaults) and update topics + bucket config
     const config_path = try std.fs.path.join(allocator, &.{ storage_path, config.ConfigStorage.collector_config_file });
     defer allocator.free(config_path);
 
     var existing = loadOrDefault(allocator, config_path);
     defer if (existing.parsed) |*p| p.deinit();
 
-    // Build topic entries from remote data
-    const topics = try allocator.alloc(config.Config.TopicEntry, parsed.value.len);
-    for (parsed.value, 0..) |remote, i| {
+    // build topic entries from remote data
+    const topics = try allocator.alloc(config.Config.TopicEntry, parsed.value.topics.len);
+    for (parsed.value.topics, 0..) |remote, i| {
         topics[i] = .{
             .topic_name = remote.name,
             .type_name = remote.type_name,
@@ -102,12 +103,18 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     existing.value.topics = topics;
     defer allocator.free(topics);
 
-    // Write updated config
+    existing.value.bucket_url = parsed.value.bucket_url;
+    existing.value.bucket_token = parsed.value.bucket_token;
+
+    // write updated config
     try writeConfig(allocator, config_path, &existing.value);
 
-    std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.len});
-    for (parsed.value) |topic| {
+    std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.topics.len});
+    for (parsed.value.topics) |topic| {
         std.debug.print("  {s} [{s}]\n", .{ topic.name, topic.type_name });
+    }
+    if (parsed.value.bucket_url.len > 0) {
+        std.debug.print("Bucket URL: {s}\n", .{parsed.value.bucket_url});
     }
 }
 
@@ -145,6 +152,8 @@ fn writeConfig(allocator: std.mem.Allocator, path: []const u8, cfg: *const confi
         min_free_disk_mb: u32,
         fsync_interval_s: u32,
         status_interval_s: u32,
+        bucket_url: []const u8,
+        bucket_token: []const u8,
         topics: []const config.Config.TopicEntry,
     };
 
@@ -159,6 +168,8 @@ fn writeConfig(allocator: std.mem.Allocator, path: []const u8, cfg: *const confi
         .min_free_disk_mb = cfg.min_free_disk_mb,
         .fsync_interval_s = cfg.fsync_interval_s,
         .status_interval_s = cfg.status_interval_s,
+        .bucket_url = cfg.bucket_url,
+        .bucket_token = cfg.bucket_token,
         .topics = cfg.topics,
     };
 

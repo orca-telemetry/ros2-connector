@@ -6,6 +6,7 @@ const cfg_mod = @import("config.zig");
 const provision = @import("configure/provision.zig");
 const discovery = @import("configure/discovery.zig");
 const sync = @import("configure/sync.zig");
+const file_stream = @import("file_stream.zig");
 
 // ---------------------------------------------------------------------------
 // Signal handling — graceful shutdown on SIGINT / SIGTERM
@@ -178,6 +179,38 @@ pub fn main() !void {
         try pipeline.runUntil(&g_running);
 
         std.debug.print("Shutdown signal received. Flushing and closing files...\n", .{});
+    } else if (std.mem.eql(u8, command, "stream")) {
+        const storage_path = cfg_mod.ConfigStorage.getStoragePath(allocator) catch |err| {
+            std.debug.print("Error: cannot determine config directory: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(storage_path);
+
+        const config_path = try std.fs.path.join(allocator, &.{ storage_path, cfg_mod.ConfigStorage.collector_config_file });
+        defer allocator.free(config_path);
+
+        const parsed = cfg_mod.load(allocator, config_path) catch |err| {
+            std.debug.print("Error: failed to load config '{s}': {}\n", .{ config_path, err });
+            return;
+        };
+        defer parsed.deinit();
+
+        const cfg = try cfg_mod.resolve(allocator, parsed.value);
+
+        if (cfg.bucket_url.len == 0) {
+            std.debug.print("Error: bucket_url not configured. Run `sync` first.\n", .{});
+            return;
+        }
+
+        installSignalHandlers();
+
+        var worker = file_stream.StreamWorker.init(
+            allocator,
+            cfg.log_directory,
+            cfg.bucket_url,
+            cfg.bucket_token,
+        );
+        worker.run(&g_running);
     } else {
         printUsage();
     }
@@ -271,6 +304,7 @@ fn printUsage() void {
         \\  discover                Scan ROS 2 network and emit schema to Orca
         \\  sync                    Sync local robot config with Orca cloud
         \\  listen                  Listen to ROS 2 topics and save data to .mcap files
+        \\  stream                  Upload completed .mcap files to the configured bucket
         \\
     , .{});
 }
