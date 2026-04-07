@@ -12,6 +12,8 @@ const file_stream = @import("file_stream.zig");
 // Signal handling — graceful shutdown on SIGINT / SIGTERM
 // ---------------------------------------------------------------------------
 
+const log = std.log.scoped(.main);
+
 var g_running: std.atomic.Value(bool) = .init(true);
 
 fn handleSignal(sig: c_int) callconv(.c) void {
@@ -197,18 +199,18 @@ pub fn main() !void {
 
         const cfg = try cfg_mod.resolve(allocator, parsed.value);
 
-        if (cfg.bucket_url.len == 0) {
-            std.debug.print("Error: bucket_url not configured. Run `sync` first.\n", .{});
-            return;
-        }
-
         installSignalHandlers();
+
+        const robot_id = cfg_mod.ConfigStorage.getRobotId(allocator) catch |err| {
+            log.err("Error: robot not provisioned. Run `orca provision --token <T>` first: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(robot_id);
 
         var worker = file_stream.StreamWorker.init(
             allocator,
             cfg.log_directory,
-            cfg.bucket_url,
-            cfg.bucket_token,
+            robot_id,
         );
         worker.run(&g_running);
     } else {

@@ -1,12 +1,17 @@
 const std = @import("std");
 const http = std.http;
+const config = @import("config.zig");
+const constants = @import("configure/constants.zig");
 
 const log = std.log.scoped(.stream);
 
 const POLL_INTERVAL_NS = 5 * std.time.ns_per_s;
-/// the size of the file read buffer. this amount will be consumed in memory and used
-/// to consume chunks of the file and then send over to the bucket via HTTP
+/// The size of the file read buffer used when streaming chunks to the bucket.
 const FILE_BUFFER_SIZE: usize = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// File discovery
+// ---------------------------------------------------------------------------
 
 /// Scans log_dir for files where both "name.mcap" and "name.mcap.sha256" exist.
 /// Returns a sorted (lexicographic = chronological) list of owned name slices.
@@ -23,7 +28,6 @@ fn collectCompletedFiles(
     }
 
     var dir = try std.fs.cwd().openDir(log_dir, .{ .iterate = true });
-
     defer dir.close();
 
     var iter = dir.iterate();
@@ -52,60 +56,116 @@ fn collectCompletedFiles(
     return candidates;
 }
 
-/// uploads an mcap file and the mcap.sha265 to the bucket endpoint
+/// Requests a presigned upload URL from the Orca app for the given file.
+/// Returns an allocator-owned URL string. Caller must free.
+fn requestPresignedUrl(
+    allocator: std.mem.Allocator,
+    robot_id: []const u8,
+    file_name: []const u8,
+) ![]u8 {
+    const url = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ constants.upload_base_url, robot_id });
+    defer allocator.free(url);
+
+    const path = try std.fmt.allocPrint(allocator, "/api/robot/upload/{s}", .{robot_id});
+    defer allocator.free(path);
+
+    // Sign: POST:/api/robot/upload/{robot_id}:{timestamp_ms}
+    const timestamp = std.time.milliTimestamp();
+    const timestamp_str = try std.fmt.allocPrint(allocator, "{d}", .{timestamp});
+    defer allocator.free(timestamp_str);
+
+    const sign_payload = try std.fmt.allocPrint(allocator, "POST:{s}:{s}", .{ path, timestamp_str });
+    defer allocator.free(sign_payload);
+
+    const sig_bytes = try config.ConfigStorage.signPayload(allocator, sign_payload);
+    const base64_encoder = std.base64.standard.Encoder;
+    var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
+    _ = base64_encoder.encode(&sig_b64, &sig_bytes);
+
+    // JSON body: {"file_name":"..."}
+    const body = try std.fmt.allocPrint(allocator, "{{\"file_name\":\"{s}\"}}", .{file_name});
+    defer allocator.free(body);
+
+    var client = http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var response_body: std.Io.Writer.Allocating = .init(allocator);
+    defer response_body.deinit();
+
+    const result = try client.fetch(.{
+        .method = .POST,
+        .location = .{ .url = url },
+        .payload = body,
+        .response_writer = &response_body.writer,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .connection = .{ .override = "close" },
+        },
+        .extra_headers = &.{
+            .{ .name = "X-Signature", .value = &sig_b64 },
+            .{ .name = "X-Timestamp", .value = timestamp_str },
+        },
+    });
+
+    if (result.status != .ok) {
+        log.warn("Presigned URL request failed (HTTP {d}) for {s}", .{ @intFromEnum(result.status), file_name });
+        return error.PresignedUrlRequestFailed;
+    }
+
+    const UrlResponse = struct {
+        url: []const u8 = "",
+    };
+
+    const parsed = try std.json.parseFromSlice(UrlResponse, allocator, response_body.written(), .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    if (parsed.value.url.len == 0) return error.EmptyPresignedUrl;
+
+    return allocator.dupe(u8, parsed.value.url);
+}
+
+// ---------------------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------------------
+
+/// Uploads a file to a presigned URL via HTTP PUT.
+/// Returns `error.UploadExpired` on 403/410 so the caller can re-request and retry.
 fn uploadFile(
     allocator: std.mem.Allocator,
     file_dir: []const u8,
     file_name: []const u8,
-    bucket_url: []const u8,
-    bucket_token: []const u8,
+    presigned_url: []const u8,
 ) !void {
-    // initialise buffers
-    var path_buf: [std.fs.max_path_bytes + std.fs.max_name_bytes]u8 = undefined; // file path name buf
-    var url_buf: [std.fs.max_path_bytes]u8 = undefined; // url name buf
-    var bearer_buf: [512]u8 = undefined; // bearer token buf
-    var file_read_buffer: [FILE_BUFFER_SIZE]u8 = undefined; // buffer used to read the file
+    var path_buf: [std.fs.max_path_bytes + std.fs.max_name_bytes]u8 = undefined;
+    var file_read_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
 
-    // open the file and extract metrics
     const file_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ file_dir, file_name });
     const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
     const file_size = (try file.stat()).size;
 
-    // get the file reader and a ptr to the interface
     var file_reader = file.reader(&file_read_buffer);
     const file_reader_interface = &file_reader.interface;
 
-    // set up the request
     var client = http.Client{ .allocator = allocator };
     defer client.deinit();
+
     var req = try client.request(
-        .POST,
-        try std.Uri.parse(
-            try std.fmt.bufPrint(&url_buf, "{s}{s}", .{ bucket_url, file_name }),
-        ),
+        .PUT,
+        try std.Uri.parse(presigned_url),
         .{
             .headers = .{
                 .content_type = .{ .override = "application/octet-stream" },
             },
-            .extra_headers = &.{
-                .{ .name = "Authorization", .value = try std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{bucket_token}) },
-            },
         },
     );
-
-    // important for single-request uploads
-    // mandated by GCP
-    // TODO: confirm if AWS is different
     req.transfer_encoding = .chunked;
-
     defer req.deinit();
 
-    // send just the header
     try req.sendBodiless();
 
-    // go through the file and write buffer chunks
-    // this calculates the exact chunks
     const n_chunks = file_size / FILE_BUFFER_SIZE;
     const remainder = file_size % FILE_BUFFER_SIZE;
     var in_flight_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
@@ -120,7 +180,24 @@ fn uploadFile(
         try file_reader_interface.readSliceAll(in_flight_buffer[0..remainder]);
         try body_writer.flush();
     }
+
+    var redirect_buf: [4096]u8 = undefined;
+    const response = try req.receiveHead(&redirect_buf);
+    const status = response.head.status;
+    const status_code = @intFromEnum(status);
+
+    if (status == .forbidden or status == .gone) {
+        return error.UploadExpired;
+    }
+    if (status_code / 100 != 2) {
+        log.warn("Upload of {s} rejected with HTTP {d}", .{ file_name, status_code });
+        return error.UploadFailed;
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
 
 /// Delete both the .mcap and .mcap.sha256 files. Logs errors but does not fail.
 fn deleteCompletedPair(
@@ -141,23 +218,24 @@ fn deleteCompletedPair(
     };
 }
 
+// ---------------------------------------------------------------------------
+// StreamWorker
+// ---------------------------------------------------------------------------
+
 pub const StreamWorker = struct {
     allocator: std.mem.Allocator,
     log_dir: []const u8,
-    bucket_url: []const u8,
-    bucket_token: []const u8,
+    robot_id: []const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
         log_dir: []const u8,
-        bucket_url: []const u8,
-        bucket_token: []const u8,
+        robot_id: []const u8,
     ) StreamWorker {
         return .{
             .allocator = allocator,
             .log_dir = log_dir,
-            .bucket_url = bucket_url,
-            .bucket_token = bucket_token,
+            .robot_id = robot_id,
         };
     }
 
@@ -184,7 +262,6 @@ pub const StreamWorker = struct {
             log.warn("Directory scan failed: {}", .{err});
             return;
         };
-
         defer {
             for (files.items) |name| self.allocator.free(name);
             files.deinit(self.allocator);
@@ -195,32 +272,35 @@ pub const StreamWorker = struct {
         log.info("Found {d} file(s) ready for upload", .{files.items.len});
 
         for (files.items) |mcap_name| {
-            uploadFile(
-                self.allocator,
-                self.log_dir,
-                mcap_name,
-                self.bucket_url,
-                self.bucket_token,
-            ) catch |err| {
-                log.warn("Upload skipped for {s}: {}", .{ mcap_name, err });
+            // request a fresh presigned URL for each file
+            var presigned_url = requestPresignedUrl(self.allocator, self.robot_id, mcap_name) catch |err| {
+                log.warn("Could not get presigned URL for {s}: {}", .{ mcap_name, err });
                 continue;
             };
+            defer self.allocator.free(presigned_url);
 
+            uploadFile(self.allocator, self.log_dir, mcap_name, presigned_url) catch |err| {
+                if (err == error.UploadExpired) {
+                    // URL expired between request and upload — re-request once and retry
+                    log.info("Presigned URL expired for {s}, re-requesting", .{mcap_name});
+                    self.allocator.free(presigned_url);
+                    presigned_url = requestPresignedUrl(self.allocator, self.robot_id, mcap_name) catch |rerr| {
+                        log.warn("Re-request failed for {s}: {}", .{ mcap_name, rerr });
+                        presigned_url = &.{}; // prevent double-free in defer
+                        continue;
+                    };
+                    uploadFile(self.allocator, self.log_dir, mcap_name, presigned_url) catch |retry_err| {
+                        log.warn("Upload retry failed for {s}: {}", .{ mcap_name, retry_err });
+                        continue;
+                    };
+                } else {
+                    log.warn("Upload skipped for {s}: {}", .{ mcap_name, err });
+                    continue;
+                }
+            };
+
+            log.info("Uploaded {s}", .{mcap_name});
             deleteCompletedPair(self.allocator, self.log_dir, mcap_name);
         }
     }
 };
-
-pub fn main() !void {
-    const dir: []u8 = "./data";
-    const bucket_url: []u8 = "?"
-    const allocator, const is_debug = gpa: {
-        break :gpa switch (builtin.mode) {
-            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
-            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
-        };
-    };
-
-    StreamWorker.init(allocator, log_dir: dir, bucket_url: , bucket_token: []const u8)
-
-}
