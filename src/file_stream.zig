@@ -85,17 +85,16 @@ fn requestPresignedUrl(
     var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
     _ = base64_encoder.encode(&sig_b64, &sig_bytes);
 
-    // Parse session hash from file name: <robot_id>_<date>_<session_hash>_<count>.mcap[.sha256]
+    // parse session hash from file name: <robot_id>_<date>_<session_hash>_<count>.mcap
     const session_hash = blk: {
         var stem = file_name;
-        if (std.mem.endsWith(u8, stem, ".sha256")) stem = stem[0 .. stem.len - 7];
         if (std.mem.endsWith(u8, stem, ".mcap")) stem = stem[0 .. stem.len - 5];
         const last_sep = std.mem.lastIndexOfScalar(u8, stem, '_') orelse break :blk "";
         const prev_sep = std.mem.lastIndexOfScalar(u8, stem[0..last_sep], '_') orelse break :blk "";
         break :blk stem[prev_sep + 1 .. last_sep];
     };
 
-    log.info("Parsed session_hash='{s}' from '{s}'", .{ session_hash, file_name });
+    log.info("parsed session_hash='{s}' from '{s}'", .{ session_hash, file_name });
 
     // JSON body: {"file_name":"...", "session_id":"..."}
     const body = try std.fmt.allocPrint(allocator, "{{\"file_name\":\"{s}\",\"session_id\":\"{s}\"}}", .{ file_name, session_hash });
@@ -122,6 +121,10 @@ fn requestPresignedUrl(
         },
     });
 
+    if (result.status == .conflict) {
+        log.warn("File already exists in storage, skipping upload for {s}", .{file_name});
+        return error.FileAlreadyExists;
+    }
     if (result.status != .ok) {
         log.warn("Presigned URL request failed (HTTP {d}) for {s}", .{ @intFromEnum(result.status), file_name });
         return error.PresignedUrlRequestFailed;
@@ -134,6 +137,7 @@ fn requestPresignedUrl(
     const parsed = try std.json.parseFromSlice(UrlResponse, allocator, response_body.written(), .{
         .ignore_unknown_fields = true,
     });
+
     defer parsed.deinit();
 
     if (parsed.value.url.len == 0) return error.EmptyPresignedUrl;
@@ -203,15 +207,17 @@ fn uploadFile(
 
     log.info("Waiting for server response...", .{});
     var redirect_buf: [4096]u8 = undefined;
-    const response = try req.receiveHead(&redirect_buf);
+    var response = try req.receiveHead(&redirect_buf);
     const status = response.head.status;
     const status_code = @intFromEnum(status);
 
-    if (status == .forbidden or status == .gone) {
-        return error.UploadExpired;
-    }
     if (status_code / 100 != 2) {
-        log.warn("Upload of {s} rejected with HTTP {d}", .{ file_name, status_code });
+        var err_transfer_buf: [4096]u8 = undefined;
+        var err_body_buf: [2048]u8 = undefined;
+        var err_body_writer: std.Io.Writer = .fixed(&err_body_buf);
+        _ = response.reader(&err_transfer_buf).streamRemaining(&err_body_writer) catch {};
+        log.warn("Upload of {s} failed with HTTP {d}: {s}", .{ file_name, status_code, err_body_writer.buffered() });
+        if (status == .forbidden or status == .gone) return error.UploadExpired;
         return error.UploadFailed;
     }
     log.info("Upload of {s} complete (HTTP {d})", .{ file_name, status_code });
@@ -266,7 +272,7 @@ pub const StreamWorker = struct {
         log.info("Stream worker started. Watching '{s}'", .{self.log_dir});
 
         while (running.load(.acquire)) {
-            self.processOneBatch();
+            self.processOneBatch(running);
 
             // sleep in 200ms increments for responsive shutdown
             var slept_ns: u64 = 0;
@@ -279,7 +285,7 @@ pub const StreamWorker = struct {
         log.info("Stream worker stopped.", .{});
     }
 
-    fn processOneBatch(self: *StreamWorker) void {
+    fn processOneBatch(self: *StreamWorker, running: *std.atomic.Value(bool)) void {
         var files = collectCompletedFiles(self.allocator, self.log_dir) catch |err| {
             log.warn("Directory scan failed: {}", .{err});
             return;
@@ -294,10 +300,17 @@ pub const StreamWorker = struct {
         log.info("Found {d} file(s) ready for upload", .{files.items.len});
 
         for (files.items) |mcap_name| {
+            if (!running.load(.acquire)) return;
+
             // request a fresh presigned URL for each file
             log.info("Requesting presigned URL for {s}...", .{mcap_name});
             var presigned_url = requestPresignedUrl(self.allocator, self.robot_id, mcap_name) catch |err| {
-                log.warn("Could not get presigned URL for {s}: {}", .{ mcap_name, err });
+                if (err == error.FileAlreadyExists) {
+                    log.warn("File already exists in storage, deleting local copy of {s}", .{mcap_name});
+                    deleteCompletedPair(self.allocator, self.log_dir, mcap_name);
+                } else {
+                    log.err("Could not get presigned URL for {s}: {}", .{ mcap_name, err });
+                }
                 continue;
             };
             defer self.allocator.free(presigned_url);
@@ -324,26 +337,6 @@ pub const StreamWorker = struct {
             };
 
             log.info("Uploaded {s}", .{mcap_name});
-
-            // Upload the sidecar sha256 file
-            const sha256_name = std.fmt.allocPrint(self.allocator, "{s}.sha256", .{mcap_name}) catch |err| {
-                log.warn("Could not build sha256 filename for {s}: {}", .{ mcap_name, err });
-                continue;
-            };
-            defer self.allocator.free(sha256_name);
-
-            const sha256_url = requestPresignedUrl(self.allocator, self.robot_id, sha256_name) catch |err| {
-                log.warn("Could not get presigned URL for {s}: {}", .{ sha256_name, err });
-                continue;
-            };
-            defer self.allocator.free(sha256_url);
-
-            uploadFile(self.allocator, self.log_dir, sha256_name, sha256_url) catch |err| {
-                log.warn("Upload failed for {s}: {}", .{ sha256_name, err });
-                continue;
-            };
-            log.info("Uploaded {s}", .{sha256_name});
-
             deleteCompletedPair(self.allocator, self.log_dir, mcap_name);
         }
     }

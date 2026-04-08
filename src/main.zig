@@ -18,7 +18,14 @@ var g_running: std.atomic.Value(bool) = .init(true);
 
 fn handleSignal(sig: c_int) callconv(.c) void {
     _ = sig;
-    g_running.store(false, .release);
+    if (g_running.swap(false, .release)) {
+        // First Ctrl+C: request graceful shutdown
+        const msg = "Shutting down, press Ctrl+C again to force exit.\n";
+        _ = std.posix.write(2, msg) catch {};
+    } else {
+        // Second Ctrl+C: force exit
+        std.posix.exit(1);
+    }
 }
 
 fn installSignalHandlers() void {
