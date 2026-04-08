@@ -73,11 +73,10 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
 
     const SyncResponse = struct {
         topics: []const RemoteTopic = &.{},
-        bucket_url: []const u8 = "",
-        bucket_token: []const u8 = "",
+        cloud_available: bool = false,
     };
 
-    const parsed = std.json.parseFromSlice(SyncResponse, allocator, body, .{
+    const parsed: std.json.Parsed(SyncResponse) = std.json.parseFromSlice(SyncResponse, allocator, body, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
         std.debug.print("Error: failed to parse sync response: {}\n", .{err});
@@ -103,8 +102,8 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     existing.value.topics = topics;
     defer allocator.free(topics);
 
-    existing.value.bucket_url = parsed.value.bucket_url;
-    existing.value.bucket_token = parsed.value.bucket_token;
+    // update the cloud availability status
+    try config.ConfigStorage.setCloudAvailabilityStatus(allocator, parsed.value.cloud_available);
 
     // write updated config
     try writeConfig(allocator, config_path, &existing.value);
@@ -112,9 +111,6 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.topics.len});
     for (parsed.value.topics) |topic| {
         std.debug.print("  {s} [{s}]\n", .{ topic.name, topic.type_name });
-    }
-    if (parsed.value.bucket_url.len > 0) {
-        std.debug.print("Bucket URL: {s}\n", .{parsed.value.bucket_url});
     }
 }
 
@@ -152,8 +148,6 @@ fn writeConfig(allocator: std.mem.Allocator, path: []const u8, cfg: *const confi
         min_free_disk_mb: u32,
         fsync_interval_s: u32,
         status_interval_s: u32,
-        bucket_url: []const u8,
-        bucket_token: []const u8,
         topics: []const config.Config.TopicEntry,
     };
 
@@ -168,8 +162,6 @@ fn writeConfig(allocator: std.mem.Allocator, path: []const u8, cfg: *const confi
         .min_free_disk_mb = cfg.min_free_disk_mb,
         .fsync_interval_s = cfg.fsync_interval_s,
         .status_interval_s = cfg.status_interval_s,
-        .bucket_url = cfg.bucket_url,
-        .bucket_token = cfg.bucket_token,
         .topics = cfg.topics,
     };
 

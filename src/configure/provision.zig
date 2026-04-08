@@ -121,7 +121,15 @@ fn uploadPublicKey(allocator: std.mem.Allocator, dir: std.fs.Dir, token: []const
     defer robot_id_file.close();
     var writer: std.Io.Writer.Allocating = .init(allocator);
     defer writer.deinit();
-    try writer.writer.print("{f}", .{std.json.fmt(config.RobotConfig{ .id = @constCast(parsed.value.robotId) }, .{})});
+    try writer.writer.print("{f}", .{
+        std.json.fmt(
+            config.RobotConfig{
+                .id = @constCast(parsed.value.robotId),
+                .cloud_available = false, // default to false. cloud availability is updated during sync
+            },
+            .{},
+        ),
+    });
     try robot_id_file.writeAll(writer.written());
 
     std.debug.print("Successfully provisioned robot: {s}\n", .{parsed.value.robotId});

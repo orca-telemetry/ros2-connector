@@ -12,8 +12,6 @@ pub const Config = struct {
     min_free_disk_mb: u32 = 500,
     fsync_interval_s: u32 = 5,
     status_interval_s: u32 = 30,
-    bucket_url: []const u8 = "",
-    bucket_token: []const u8 = "",
     topics: []const TopicEntry,
 
     pub const TopicEntry = struct {
@@ -57,12 +55,6 @@ pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     if (std.posix.getenv("ORCA_STATUS_INTERVAL_S")) |val| {
         result.status_interval_s = std.fmt.parseInt(u32, val, 10) catch result.status_interval_s;
     }
-    if (std.posix.getenv("ORCA_BUCKET_URL")) |val| {
-        result.bucket_url = val;
-    }
-    if (std.posix.getenv("ORCA_BUCKET_TOKEN")) |val| {
-        result.bucket_token = val;
-    }
 
     // if log_directory is still empty (default), resolve to ~/.orca/logs
     if (result.log_directory.len == 0) {
@@ -94,13 +86,14 @@ pub fn validate(cfg: *const Config) !void {
 
 pub const RobotConfig = struct {
     id: []u8,
+    cloud_available: bool,
 };
 
 pub const ConfigStorage = struct {
     const dir_name = ".orca";
     pub const pub_key_file = "id_ed25519.pub";
     pub const priv_key_file = "id_ed25519";
-    pub const robot_config_file = "config.json";
+    pub const robot_config_file = "config.json"; // RobotConfig
     pub const collector_config_file = "collector.json";
 
     pub fn getStoragePath(allocator: std.mem.Allocator) ![]u8 {
@@ -124,6 +117,52 @@ pub const ConfigStorage = struct {
         defer parsed.deinit();
 
         return try allocator.dupe(u8, parsed.value.id);
+    }
+
+    /// retrieve from the config whether the asset is configured to
+    /// stream to the cloud
+    pub fn getCloudAvailabilityStatus(allocator: std.mem.Allocator) bool {
+        const storage_path = try getStoragePath(allocator);
+        defer allocator.free(storage_path);
+
+        var dir = try std.fs.openDirAbsolute(storage_path, .{});
+        defer dir.close();
+
+        const file_contents = try dir.readFileAlloc(allocator, "config.json", 1024 * 1024);
+        defer allocator.free(file_contents);
+
+        const parsed = try std.json.parseFromSlice(RobotConfig, allocator, file_contents, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        return try allocator.dupe(bool, parsed.value.cloud_available);
+    }
+
+    pub fn setCloudAvailabilityStatus(allocator: std.mem.Allocator, cloud_availability: bool) !void {
+        const storage_path = try getStoragePath(allocator);
+        defer allocator.free(storage_path);
+
+        var dir = try std.fs.openDirAbsolute(storage_path, .{});
+        defer dir.close();
+
+        const file_contents = try dir.readFileAlloc(allocator, "config.json", 1024 * 1024);
+        defer allocator.free(file_contents);
+
+        const parsed: std.json.Parsed(RobotConfig) = try std.json.parseFromSlice(RobotConfig, allocator, file_contents, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        // copy the config so we can mutate it
+        var updated = parsed.value;
+        updated.cloud_available = cloud_availability;
+
+        // write it back
+        const file = try dir.createFile("config.json", .{});
+        defer file.close();
+
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+
+        try writer.writer.print("{f}", .{std.json.fmt(updated, .{})});
+        try file.writeAll(writer.written());
     }
 
     pub fn signPayload(allocator: std.mem.Allocator, message: []const u8) ![64]u8 { // Note: Ed25519 signature is 64 bytes
