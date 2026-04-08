@@ -118,8 +118,7 @@ pub const Pipeline = struct {
     writer_pool: McapWriterPool,
     wait_set: c.rcl_wait_set_t,
     log_dir_z: [*:0]const u8,
-    disk_usage_limit_pct: u32,
-    min_free_disk_mb: u32,
+    max_log_dir_size_mb: u32,
     status_reporter: status.StatusReporter,
 
     pub fn init(
@@ -215,8 +214,7 @@ pub const Pipeline = struct {
             .writer_pool = writer_pool,
             .wait_set = wait_set,
             .log_dir_z = log_dir_z.ptr,
-            .disk_usage_limit_pct = cfg.disk_usage_limit_pct,
-            .min_free_disk_mb = cfg.min_free_disk_mb,
+            .max_log_dir_size_mb = cfg.max_log_dir_size_mb,
             .status_reporter = status_reporter,
         };
     }
@@ -296,8 +294,7 @@ pub const Pipeline = struct {
         const deleted = storage.cleanupOldFiles(
             self.arena.allocator(),
             self.log_dir_z,
-            self.disk_usage_limit_pct,
-            self.min_free_disk_mb,
+            self.max_log_dir_size_mb,
         ) catch |err| {
             std.log.err("Disk cleanup failed: {}", .{err});
             return;
