@@ -5,6 +5,8 @@ const http = std.http;
 
 const log = std.log.scoped(.sync);
 
+pub const SyncError = error{ SyncFailed, SyncTooEarly, NotProvisioned };
+
 /// Fetch topic configuration from Orca cloud and write it to the local config file.
 pub fn syncConfig(allocator: std.mem.Allocator) !void {
     const robot_id = config.ConfigStorage.getRobotId(allocator) catch {
@@ -57,6 +59,11 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
         },
     });
 
+    if (result.status == .service_unavailable) {
+        // reserved by the server to denote that sync is not ready yet
+        return error.SyncTooEarly;
+    }
+
     if (result.status != .ok) {
         const body = response_body.written();
         std.debug.print("Sync failed (HTTP {d}): {s}\n", .{ @intFromEnum(result.status), body });
@@ -65,13 +72,18 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
 
     const body = response_body.written();
 
-    // Parse response — array of topic objects with "name" and "type_name"
+    // parse response - top-level object with topics array and optional bucket config
     const RemoteTopic = struct {
         name: []const u8,
         type_name: []const u8,
     };
 
-    const parsed = std.json.parseFromSlice([]const RemoteTopic, allocator, body, .{
+    const SyncResponse = struct {
+        topics: []const RemoteTopic = &.{},
+        cloud_available: bool = false,
+    };
+
+    const parsed: std.json.Parsed(SyncResponse) = std.json.parseFromSlice(SyncResponse, allocator, body, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
         std.debug.print("Error: failed to parse sync response: {}\n", .{err});
@@ -79,21 +91,16 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     };
     defer parsed.deinit();
 
-    if (parsed.value.len == 0) {
-        std.debug.print("Error: server returned no topics\n", .{});
-        return error.NoTopics;
-    }
-
-    // Load existing config (or use defaults) and update topics
+    // load existing config (or use defaults) and update topics + bucket config
     const config_path = try std.fs.path.join(allocator, &.{ storage_path, config.ConfigStorage.collector_config_file });
     defer allocator.free(config_path);
 
     var existing = loadOrDefault(allocator, config_path);
     defer if (existing.parsed) |*p| p.deinit();
 
-    // Build topic entries from remote data
-    const topics = try allocator.alloc(config.Config.TopicEntry, parsed.value.len);
-    for (parsed.value, 0..) |remote, i| {
+    // build topic entries from remote data
+    const topics = try allocator.alloc(config.Config.TopicEntry, parsed.value.topics.len);
+    for (parsed.value.topics, 0..) |remote, i| {
         topics[i] = .{
             .topic_name = remote.name,
             .type_name = remote.type_name,
@@ -102,11 +109,14 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
     existing.value.topics = topics;
     defer allocator.free(topics);
 
-    // Write updated config
+    // update the cloud availability status
+    try config.ConfigStorage.setCloudAvailabilityStatus(allocator, parsed.value.cloud_available);
+
+    // write updated config
     try writeConfig(allocator, config_path, &existing.value);
 
-    std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.len});
-    for (parsed.value) |topic| {
+    std.debug.print("Synced {d} topic(s) from Orca cloud.\n", .{parsed.value.topics.len});
+    for (parsed.value.topics) |topic| {
         std.debug.print("  {s} [{s}]\n", .{ topic.name, topic.type_name });
     }
 }
