@@ -85,8 +85,20 @@ fn requestPresignedUrl(
     var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
     _ = base64_encoder.encode(&sig_b64, &sig_bytes);
 
-    // JSON body: {"file_name":"..."}
-    const body = try std.fmt.allocPrint(allocator, "{{\"file_name\":\"{s}\"}}", .{file_name});
+    // Parse session hash from file name: <robot_id>_<date>_<session_hash>_<count>.mcap
+    const session_hash = blk: {
+        // Strip .mcap suffix
+        const stem = if (std.mem.endsWith(u8, file_name, ".mcap")) file_name[0 .. file_name.len - 5] else file_name;
+        // Find the last underscore (before count), then the one before it (before hash)
+        const last_sep = std.mem.lastIndexOfScalar(u8, stem, '_') orelse break :blk "";
+        const prev_sep = std.mem.lastIndexOfScalar(u8, stem[0..last_sep], '_') orelse break :blk "";
+        break :blk stem[prev_sep + 1 .. last_sep];
+    };
+
+    log.info("Parsed session_hash='{s}' from '{s}'", .{ session_hash, file_name });
+
+    // JSON body: {"file_name":"...", "session_id":"..."}
+    const body = try std.fmt.allocPrint(allocator, "{{\"file_name\":\"{s}\",\"session_id\":\"{s}\"}}", .{ file_name, session_hash });
     defer allocator.free(body);
 
     var client = http.Client{ .allocator = allocator };
@@ -149,12 +161,15 @@ fn uploadFile(
     defer file.close();
     const file_size = (try file.stat()).size;
 
+    log.info("Uploading {s} ({d} bytes)", .{ file_name, file_size });
+
     var file_reader = file.reader(&file_read_buffer);
     const file_reader_interface = &file_reader.interface;
 
     var client = http.Client{ .allocator = allocator };
     defer client.deinit();
 
+    log.info("Connecting to presigned URL...", .{});
     var req = try client.request(
         .PUT,
         try std.Uri.parse(presigned_url),
@@ -164,26 +179,29 @@ fn uploadFile(
             },
         },
     );
-    req.transfer_encoding = .chunked;
+    req.transfer_encoding = .{ .content_length = file_size };
     defer req.deinit();
 
-    try req.sendBodiless();
+    var read_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
+    var write_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
 
-    const n_chunks = file_size / FILE_BUFFER_SIZE;
-    const remainder = file_size % FILE_BUFFER_SIZE;
-    var in_flight_buffer: [FILE_BUFFER_SIZE]u8 = undefined;
-    var body_writer = try req.sendBody(&in_flight_buffer);
+    log.info("Sending request head + body ({d} bytes)...", .{file_size});
+    var body_writer = try req.sendBody(&write_buffer);
 
-    for (0..n_chunks) |_| {
-        try file_reader_interface.readSliceAll(&in_flight_buffer);
-        try body_writer.flush();
+    var bytes_written: usize = 0;
+    while (bytes_written < file_size) {
+        const remaining = file_size - bytes_written;
+        const to_read = @min(remaining, FILE_BUFFER_SIZE);
+        try file_reader_interface.readSliceAll(read_buffer[0..to_read]);
+        try body_writer.writer.writeAll(read_buffer[0..to_read]);
+        bytes_written += to_read;
+        log.info("  {d}/{d} bytes written", .{ bytes_written, file_size });
     }
 
-    if (remainder > 0) {
-        try file_reader_interface.readSliceAll(in_flight_buffer[0..remainder]);
-        try body_writer.flush();
-    }
+    log.info("Body sent, ending transfer...", .{});
+    try body_writer.end();
 
+    log.info("Waiting for server response...", .{});
     var redirect_buf: [4096]u8 = undefined;
     const response = try req.receiveHead(&redirect_buf);
     const status = response.head.status;
@@ -196,6 +214,7 @@ fn uploadFile(
         log.warn("Upload of {s} rejected with HTTP {d}", .{ file_name, status_code });
         return error.UploadFailed;
     }
+    log.info("Upload of {s} complete (HTTP {d})", .{ file_name, status_code });
 }
 
 // ---------------------------------------------------------------------------
@@ -276,11 +295,13 @@ pub const StreamWorker = struct {
 
         for (files.items) |mcap_name| {
             // request a fresh presigned URL for each file
+            log.info("Requesting presigned URL for {s}...", .{mcap_name});
             var presigned_url = requestPresignedUrl(self.allocator, self.robot_id, mcap_name) catch |err| {
                 log.warn("Could not get presigned URL for {s}: {}", .{ mcap_name, err });
                 continue;
             };
             defer self.allocator.free(presigned_url);
+            log.info("Presigned URL: {s}", .{presigned_url});
 
             uploadFile(self.allocator, self.log_dir, mcap_name, presigned_url) catch |err| {
                 if (err == error.UploadExpired) {

@@ -216,8 +216,12 @@ pub fn main() !void {
         defer parsed.deinit();
 
         const cfg = try cfg_mod.resolve(allocator, parsed.value);
+        defer if (cfg.log_directory.ptr != parsed.value.log_directory.ptr) {
+            allocator.free(cfg.log_directory);
+        };
 
         installSignalHandlers();
+        std.debug.print("Press Ctrl+C to stop.\n", .{});
 
         const robot_id = cfg_mod.ConfigStorage.getRobotId(allocator) catch |err| {
             log.err("Error: robot not provisioned. Run `orca provision --token <T>` first: {}\n", .{err});

@@ -175,6 +175,7 @@ pub const McapWriterPool = struct {
     out_dir: []const u8,
     robot_id: []const u8,
     software_version: []const u8,
+    session_id: [8]u8, // 8 hex chars, stable for the lifetime of this session
     max_duration_ns: u64,
     max_size_bytes: u64,
     fsync_interval_ns: u64,
@@ -195,7 +196,13 @@ pub const McapWriterPool = struct {
     ) !McapWriterPool {
         const now_ns: u64 = @intCast(std.time.nanoTimestamp());
 
-        const filename = try generateFilename(allocator, out_dir, robot_id, now_ns, 0);
+        // Generate a random 8-char hex session ID stable across rotations
+        var rng = std.Random.DefaultPrng.init(@bitCast(now_ns));
+        const rand_val = rng.random().int(u32);
+        var session_id: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&session_id, "{x:0>8}", .{rand_val}) catch unreachable;
+
+        const filename = try generateFilename(allocator, out_dir, robot_id, &session_id, now_ns, 0);
         const incomplete = try std.fmt.allocPrintSentinel(
             allocator,
             "{s}.incomplete",
@@ -233,6 +240,7 @@ pub const McapWriterPool = struct {
             .out_dir = out_dir,
             .robot_id = robot_id,
             .software_version = software_version,
+            .session_id = session_id,
             .max_duration_ns = max_duration_ns,
             .max_size_bytes = max_size_bytes,
             .fsync_interval_ns = fsync_interval_ns,
@@ -283,6 +291,7 @@ pub const McapWriterPool = struct {
             allocator,
             self.out_dir,
             self.robot_id,
+            &self.session_id,
             now_ns,
             self.sequence,
         );
@@ -569,19 +578,20 @@ fn formatTimestamp(allocator: std.mem.Allocator, ns: u64) ![:0]const u8 {
     );
 }
 
-/// Generate a filename: <out_dir>/<robot_id>_<YYYYMMDD_HHMMSS>_<seq>.mcap
+/// Generate a filename: <out_dir>/<robot_id>_<YYYYMMDD_HHMMSS>_<session>_<seq>.mcap
 fn generateFilename(
     allocator: std.mem.Allocator,
     out_dir: []const u8,
     robot_id: []const u8,
+    session_id: *const [8]u8,
     timestamp_ns: u64,
     sequence: u32,
 ) ![:0]const u8 {
     const ts = try formatTimestamp(allocator, timestamp_ns);
     return try std.fmt.allocPrintSentinel(
         allocator,
-        "{s}/{s}_{s}_{d:0>4}.mcap",
-        .{ out_dir, robot_id, ts, sequence },
+        "{s}/{s}_{s}_{s}_{d:0>4}.mcap",
+        .{ out_dir, robot_id, ts, session_id, sequence },
         0,
     );
 }
