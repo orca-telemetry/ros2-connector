@@ -53,7 +53,16 @@ pub fn main() !void {
 
     const command = args[1];
 
-    if (std.mem.eql(u8, command, "provision")) {
+    if (std.mem.eql(u8, command, "cloud_available")) {
+        // command hidden to the user.
+        // used in the script
+        const status = try cfg_mod.ConfigStorage.getCloudAvailabilityStatus(allocator);
+        if (status) {
+            std.process.exit(1);
+        } else {
+            std.process.exit(0);
+        }
+    } else if (std.mem.eql(u8, command, "provision")) {
         var token: ?[]const u8 = null;
         var force = false;
         var i: usize = 2;

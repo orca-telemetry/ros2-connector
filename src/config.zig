@@ -121,7 +121,7 @@ pub const ConfigStorage = struct {
 
     /// retrieve from the config whether the asset is configured to
     /// stream to the cloud
-    pub fn getCloudAvailabilityStatus(allocator: std.mem.Allocator) bool {
+    pub fn getCloudAvailabilityStatus(allocator: std.mem.Allocator) !bool {
         const storage_path = try getStoragePath(allocator);
         defer allocator.free(storage_path);
 
@@ -134,7 +134,7 @@ pub const ConfigStorage = struct {
         const parsed = try std.json.parseFromSlice(RobotConfig, allocator, file_contents, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
-        return try allocator.dupe(bool, parsed.value.cloud_available);
+        return parsed.value.cloud_available;
     }
 
     pub fn setCloudAvailabilityStatus(allocator: std.mem.Allocator, cloud_availability: bool) !void {

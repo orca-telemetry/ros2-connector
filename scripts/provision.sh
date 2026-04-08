@@ -44,11 +44,23 @@ if [[ -z "${ROS_VERSION:-}" ]]; then
     exit 1
 fi
 
-# 2. Download the binary (always fetch latest)
+# Check if binary already exists and prompt to overwrite
 TARGET_PATH="${INSTALL_DIR}/${BINARY_NAME}"
-echo "Downloading ${BINARY_NAME}..." >&2
-curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
-chmod +x "$TARGET_PATH"
+if [[ -f "$TARGET_PATH" ]]; then
+    read -rp "Orca binary already exists at ${TARGET_PATH}. Overwrite? (recommended) [Y/n] " answer </dev/tty
+    answer="${answer:-Y}"
+    if [[ "${answer,,}" != "y" ]]; then
+        echo "Skipping download, using existing binary." >&2
+    else
+        echo "Downloading ${BINARY_NAME}..." >&2
+        curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
+        chmod +x "$TARGET_PATH"
+    fi
+else
+    echo "Downloading ${BINARY_NAME}..." >&2
+    curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
+    chmod +x "$TARGET_PATH"
+fi
 
 # Provision
 FORCE_FLAG=""
@@ -115,4 +127,47 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable --now "${SERVICE_NAME}.service"
 
-echo "Robot onboarded with Orca. Service '${SERVICE_NAME}' is running."
+# Check cloud availability and optionally set up orca-stream service
+echo "Checking cloud availability..."
+STREAM_SERVICE_NAME="orca-stream"
+
+# exit code 1 = cloud available, exit code 0 = not available
+# We need to suppress set -e for this check since we're branching on exit code
+set +e
+"$TARGET_PATH" cloud_available
+CLOUD_EXIT=$?
+set -e
+
+if [[ $CLOUD_EXIT -eq 1 ]]; then
+    echo "Cloud is available. Setting up ${STREAM_SERVICE_NAME} service..." >&2
+
+    cat > "${UNIT_DIR}/${STREAM_SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=Orca ROS 2 Stream
+After=network-online.target ${SERVICE_NAME}.service
+Wants=network-online.target
+Requires=${SERVICE_NAME}.service
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/opt/ros/jazzy/lib
+ExecStart=${TARGET_PATH} stream
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now "${STREAM_SERVICE_NAME}.service"
+    echo "Robot onboarded with Orca. Services '${SERVICE_NAME}' and '${STREAM_SERVICE_NAME}' are running."
+
+elif [[ $CLOUD_EXIT -eq 0 ]]; then
+    echo "Cloud is not available. Skipping ${STREAM_SERVICE_NAME} service." >&2
+    echo "Robot onboarded with Orca. Service '${SERVICE_NAME}' is running."
+
+else
+    echo "Error: cloud_available exited with unexpected code ${CLOUD_EXIT}." >&2
+    exit 1
+fi
