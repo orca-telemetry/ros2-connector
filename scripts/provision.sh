@@ -79,8 +79,14 @@ fi
 # Sync (retry every 5 seconds until success)
 echo "Starting sync step..."
 until "$TARGET_PATH" sync; do
-    echo "Sync not ready, retrying in 5 seconds..." >&2
-    sleep 5
+    EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 2 ]]; then
+        echo "Sync not ready, retrying in 5 seconds..." >&2
+        sleep 5
+    else
+        echo "Error: Sync failed with exit code $EXIT_CODE" >&2
+        exit 1
+    fi
 done
 
 # Install and start systemd service for `orca listen`

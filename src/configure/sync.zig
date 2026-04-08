@@ -5,6 +5,8 @@ const http = std.http;
 
 const log = std.log.scoped(.sync);
 
+pub const SyncError = error{ SyncFailed, SyncTooEarly, NotProvisioned };
+
 /// Fetch topic configuration from Orca cloud and write it to the local config file.
 pub fn syncConfig(allocator: std.mem.Allocator) !void {
     const robot_id = config.ConfigStorage.getRobotId(allocator) catch {
@@ -56,6 +58,11 @@ pub fn syncConfig(allocator: std.mem.Allocator) !void {
             .{ .name = "X-Timestamp", .value = timestamp_str },
         },
     });
+
+    if (result.status == .service_unavailable) {
+        // reserved by the server to denote that sync is not ready yet
+        return error.SyncTooEarly;
+    }
 
     if (result.status != .ok) {
         const body = response_body.written();

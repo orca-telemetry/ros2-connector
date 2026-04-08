@@ -112,7 +112,16 @@ pub fn main() !void {
 
         try discovery.runDiscovery(allocator, &node);
     } else if (std.mem.eql(u8, command, "sync")) {
-        try sync.syncConfig(allocator);
+        sync.syncConfig(allocator) catch |err| switch (err) {
+            error.SyncTooEarly => {
+                log.warn("sync run too early. try again soon", .{});
+                std.process.exit(2);
+            },
+            else => {
+                log.err("sync failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            },
+        };
     } else if (std.mem.eql(u8, command, "listen")) {
         // --- Load and validate collector config from ~/.orca/collector.json ---
         const storage_path = cfg_mod.ConfigStorage.getStoragePath(allocator) catch |err| {
