@@ -5,7 +5,10 @@ const constants = @import("configure/constants.zig");
 
 const log = std.log.scoped(.stream);
 
+/// Frequency at which we should search the directory for mcap files to stream
+/// to the bucket.
 const POLL_INTERVAL_NS = 5 * std.time.ns_per_s;
+
 /// The size of the file read buffer used when streaming chunks to the bucket.
 const FILE_BUFFER_SIZE: usize = 1024 * 1024;
 
