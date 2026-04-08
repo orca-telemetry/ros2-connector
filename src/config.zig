@@ -9,7 +9,7 @@ pub const Config = struct {
     write_buffer_mb: u32 = 8,
     software_version: []const u8 = "0.1.0",
     disk_usage_limit_pct: u32 = 80,
-    min_free_disk_mb: u32 = 500,
+    min_free_disk_mb: u32 = 200,
     fsync_interval_s: u32 = 5,
     status_interval_s: u32 = 30,
     topics: []const TopicEntry,
@@ -60,7 +60,7 @@ pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     if (result.log_directory.len == 0) {
         const home = std.posix.getenv("HOME") orelse "/tmp";
         result.log_directory = try std.fs.path.join(allocator, &.{ home, ".orca", "logs" });
-        defer allocator.free(result.log_directory);
+        // Caller owns this allocation — see main.zig defer at cfg.log_directory free
     }
 
     return result;
