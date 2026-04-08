@@ -85,11 +85,11 @@ fn requestPresignedUrl(
     var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
     _ = base64_encoder.encode(&sig_b64, &sig_bytes);
 
-    // Parse session hash from file name: <robot_id>_<date>_<session_hash>_<count>.mcap
+    // Parse session hash from file name: <robot_id>_<date>_<session_hash>_<count>.mcap[.sha256]
     const session_hash = blk: {
-        // Strip .mcap suffix
-        const stem = if (std.mem.endsWith(u8, file_name, ".mcap")) file_name[0 .. file_name.len - 5] else file_name;
-        // Find the last underscore (before count), then the one before it (before hash)
+        var stem = file_name;
+        if (std.mem.endsWith(u8, stem, ".sha256")) stem = stem[0 .. stem.len - 7];
+        if (std.mem.endsWith(u8, stem, ".mcap")) stem = stem[0 .. stem.len - 5];
         const last_sep = std.mem.lastIndexOfScalar(u8, stem, '_') orelse break :blk "";
         const prev_sep = std.mem.lastIndexOfScalar(u8, stem[0..last_sep], '_') orelse break :blk "";
         break :blk stem[prev_sep + 1 .. last_sep];
@@ -324,6 +324,26 @@ pub const StreamWorker = struct {
             };
 
             log.info("Uploaded {s}", .{mcap_name});
+
+            // Upload the sidecar sha256 file
+            const sha256_name = std.fmt.allocPrint(self.allocator, "{s}.sha256", .{mcap_name}) catch |err| {
+                log.warn("Could not build sha256 filename for {s}: {}", .{ mcap_name, err });
+                continue;
+            };
+            defer self.allocator.free(sha256_name);
+
+            const sha256_url = requestPresignedUrl(self.allocator, self.robot_id, sha256_name) catch |err| {
+                log.warn("Could not get presigned URL for {s}: {}", .{ sha256_name, err });
+                continue;
+            };
+            defer self.allocator.free(sha256_url);
+
+            uploadFile(self.allocator, self.log_dir, sha256_name, sha256_url) catch |err| {
+                log.warn("Upload failed for {s}: {}", .{ sha256_name, err });
+                continue;
+            };
+            log.info("Uploaded {s}", .{sha256_name});
+
             deleteCompletedPair(self.allocator, self.log_dir, mcap_name);
         }
     }
