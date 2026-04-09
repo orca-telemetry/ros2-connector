@@ -29,23 +29,38 @@ pub fn getUsage(log_dir: [*:0]const u8) !DiskUsage {
     return .{ .used_pct = used_pct, .free_mb = free_mb };
 }
 
-/// Delete oldest completed .mcap files (and companion .sha256) until disk usage
-/// is within limits. Returns the number of files deleted.
+/// Sum the sizes of all completed .mcap files in the log directory (bytes).
+fn logDirSizeBytes(dir_path: []const u8) !u64 {
+    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var total: u64 = 0;
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".mcap")) continue;
+        const stat = dir.statFile(entry.name) catch continue;
+        total += stat.size;
+    }
+    return total;
+}
+
+/// Delete oldest completed .mcap files (and companion .sha256) until the total
+/// size of .mcap files in the log directory is within max_log_dir_size_mb.
+/// Returns the number of files deleted.
 /// Never deletes the most recent file (always keeps at least one).
 pub fn cleanupOldFiles(
     allocator: std.mem.Allocator,
     log_dir: [*:0]const u8,
-    disk_usage_limit_pct: u32,
-    min_free_disk_mb: u32,
+    max_log_dir_size_mb: u32,
 ) !u32 {
-    // Check if we're already within limits
-    const usage = try getUsage(log_dir);
-    if (usage.used_pct <= disk_usage_limit_pct and usage.free_mb >= min_free_disk_mb) {
+    const dir_path: []const u8 = std.mem.sliceTo(log_dir, 0);
+    const limit_bytes: u64 = @as(u64, max_log_dir_size_mb) * 1024 * 1024;
+
+    // Check if we're already within the limit
+    if (try logDirSizeBytes(dir_path) <= limit_bytes) {
         return 0;
     }
-
-    // Convert sentinel pointer to slice for std.fs operations
-    const dir_path: []const u8 = std.mem.sliceTo(log_dir, 0);
 
     // Collect completed .mcap filenames (not .incomplete, .recovering, .unrecoverable)
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -61,9 +76,6 @@ pub fn cleanupOldFiles(
     while (try iter.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".mcap")) continue;
-        // Skip files with extra suffixes (.incomplete, .recovering, .unrecoverable)
-        // Those would end with e.g. ".mcap.incomplete", not ".mcap"
-        // Since we check endsWith(".mcap"), bare ".mcap" files are already correct.
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
 
@@ -79,7 +91,6 @@ pub fn cleanupOldFiles(
     var deleted: u32 = 0;
     // Delete oldest first, but always keep the last (most recent) file
     for (names.items[0 .. names.items.len - 1]) |name| {
-        // Delete the .mcap file
         const mcap_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
         defer allocator.free(mcap_path);
 
@@ -96,11 +107,9 @@ pub fn cleanupOldFiles(
 
         deleted += 1;
 
-        // Re-check usage after each deletion
-        const current = getUsage(log_dir) catch break;
-        if (current.used_pct <= disk_usage_limit_pct and current.free_mb >= min_free_disk_mb) {
-            break;
-        }
+        // Re-check size after each deletion
+        const current_size = logDirSizeBytes(dir_path) catch break;
+        if (current_size <= limit_bytes) break;
     }
 
     return deleted;

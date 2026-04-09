@@ -173,8 +173,9 @@ pub const StatusReporter = struct {
 
         // Sign payload
         const sig_bytes = try config.ConfigStorage.signPayload(allocator, json_bytes);
-        var sig_b64: [base64_encoder.calcSize(64)]u8 = undefined;
-        _ = base64_encoder.encode(&sig_b64, &sig_bytes);
+        var sig_b64_buf: [base64_encoder.calcSize(64)]u8 = undefined;
+        // sig_b64 is []u8 pointing to exactly the encoded bytes
+        const sig_b64 = base64_encoder.encode(&sig_b64_buf, &sig_bytes);
 
         // HTTP POST
         var client = http.Client{ .allocator = allocator };
@@ -197,7 +198,7 @@ pub const StatusReporter = struct {
                 .connection = .{ .override = "close" },
             },
             .extra_headers = &.{
-                .{ .name = "X-Signature", .value = &sig_b64 },
+                .{ .name = "X-Signature", .value = sig_b64 },
             },
         });
 

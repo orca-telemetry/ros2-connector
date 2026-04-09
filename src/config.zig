@@ -8,8 +8,7 @@ pub const Config = struct {
     max_bag_size_mb: u32 = 512,
     write_buffer_mb: u32 = 8,
     software_version: []const u8 = "0.1.0",
-    disk_usage_limit_pct: u32 = 80,
-    min_free_disk_mb: u32 = 500,
+    max_log_dir_size_mb: u32 = 10240,
     fsync_interval_s: u32 = 5,
     status_interval_s: u32 = 30,
     topics: []const TopicEntry,
@@ -43,11 +42,8 @@ pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     if (std.posix.getenv("ORCA_LOG_DIRECTORY")) |val| {
         result.log_directory = val;
     }
-    if (std.posix.getenv("ORCA_DISK_USAGE_LIMIT_PCT")) |val| {
-        result.disk_usage_limit_pct = std.fmt.parseInt(u32, val, 10) catch result.disk_usage_limit_pct;
-    }
-    if (std.posix.getenv("ORCA_MIN_FREE_DISK_MB")) |val| {
-        result.min_free_disk_mb = std.fmt.parseInt(u32, val, 10) catch result.min_free_disk_mb;
+    if (std.posix.getenv("ORCA_MAX_LOG_DIR_SIZE_MB")) |val| {
+        result.max_log_dir_size_mb = std.fmt.parseInt(u32, val, 10) catch result.max_log_dir_size_mb;
     }
     if (std.posix.getenv("ORCA_FSYNC_INTERVAL_S")) |val| {
         result.fsync_interval_s = std.fmt.parseInt(u32, val, 10) catch result.fsync_interval_s;
@@ -60,7 +56,7 @@ pub fn resolve(allocator: std.mem.Allocator, cfg: Config) !Config {
     if (result.log_directory.len == 0) {
         const home = std.posix.getenv("HOME") orelse "/tmp";
         result.log_directory = try std.fs.path.join(allocator, &.{ home, ".orca", "logs" });
-        defer allocator.free(result.log_directory);
+        // Caller owns this allocation — see main.zig defer at cfg.log_directory free
     }
 
     return result;
@@ -121,7 +117,7 @@ pub const ConfigStorage = struct {
 
     /// retrieve from the config whether the asset is configured to
     /// stream to the cloud
-    pub fn getCloudAvailabilityStatus(allocator: std.mem.Allocator) bool {
+    pub fn getCloudAvailabilityStatus(allocator: std.mem.Allocator) !bool {
         const storage_path = try getStoragePath(allocator);
         defer allocator.free(storage_path);
 
@@ -134,7 +130,7 @@ pub const ConfigStorage = struct {
         const parsed = try std.json.parseFromSlice(RobotConfig, allocator, file_contents, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
-        return try allocator.dupe(bool, parsed.value.cloud_available);
+        return parsed.value.cloud_available;
     }
 
     pub fn setCloudAvailabilityStatus(allocator: std.mem.Allocator, cloud_availability: bool) !void {

@@ -18,7 +18,14 @@ var g_running: std.atomic.Value(bool) = .init(true);
 
 fn handleSignal(sig: c_int) callconv(.c) void {
     _ = sig;
-    g_running.store(false, .release);
+    if (g_running.swap(false, .release)) {
+        // First Ctrl+C: request graceful shutdown
+        const msg = "Shutting down, press Ctrl+C again to force exit.\n";
+        _ = std.posix.write(2, msg) catch {};
+    } else {
+        // Second Ctrl+C: force exit
+        std.posix.exit(1);
+    }
 }
 
 fn installSignalHandlers() void {
@@ -53,7 +60,16 @@ pub fn main() !void {
 
     const command = args[1];
 
-    if (std.mem.eql(u8, command, "provision")) {
+    if (std.mem.eql(u8, command, "cloud_available")) {
+        // command hidden to the user.
+        // used in the script
+        const status = try cfg_mod.ConfigStorage.getCloudAvailabilityStatus(allocator);
+        if (status) {
+            std.process.exit(1);
+        } else {
+            std.process.exit(0);
+        }
+    } else if (std.mem.eql(u8, command, "provision")) {
         var token: ?[]const u8 = null;
         var force = false;
         var i: usize = 2;
@@ -207,8 +223,12 @@ pub fn main() !void {
         defer parsed.deinit();
 
         const cfg = try cfg_mod.resolve(allocator, parsed.value);
+        defer if (cfg.log_directory.ptr != parsed.value.log_directory.ptr) {
+            allocator.free(cfg.log_directory);
+        };
 
         installSignalHandlers();
+        std.debug.print("Press Ctrl+C to stop.\n", .{});
 
         const robot_id = cfg_mod.ConfigStorage.getRobotId(allocator) catch |err| {
             log.err("Error: robot not provisioned. Run `orca provision --token <T>` first: {}\n", .{err});
