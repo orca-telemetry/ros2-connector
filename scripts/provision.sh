@@ -53,12 +53,12 @@ if [[ -f "$TARGET_PATH" ]]; then
         echo "Skipping download, using existing binary." >&2
     else
         echo "Downloading ${BINARY_NAME}..." >&2
-        curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
+        curl -L -sS -o "$TARGET_PATH" "$BINARY_URL" < /dev/null
         chmod +x "$TARGET_PATH"
     fi
 else
     echo "Downloading ${BINARY_NAME}..." >&2
-    curl -L -sS -o "$TARGET_PATH" "$BINARY_URL"
+    curl -L -sS -o "$TARGET_PATH" "$BINARY_URL" < /dev/null
     chmod +x "$TARGET_PATH"
 fi
 
