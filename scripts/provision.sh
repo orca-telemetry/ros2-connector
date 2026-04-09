@@ -25,6 +25,14 @@ esac
 BINARY_URL="${BASE_URL}/${BINARY_NAME}-${BINARY_SUFFIX}"
 echo "Detected architecture: ${ARCH} (using binary suffix: ${BINARY_SUFFIX})" >&2
 
+cleanup_services() {
+    for svc in orca-listen orca-stream; do
+        systemctl --user disable --now "${svc}.service" 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/${svc}.service"
+    done
+    systemctl --user daemon-reload 2>/dev/null || true
+}
+
 # Determine ROS version + Source setup
 if [[ -z "${ROS_DISTRO:-}" ]]; then
     echo "Scanning for ROS 2 installation..." >&2
@@ -43,6 +51,8 @@ if [[ -z "${ROS_VERSION:-}" ]]; then
     echo "Error: ROS 2 environment not detected. Please install ROS 2 or source it manually." >&2
     exit 1
 fi
+
+cleanup_services
 
 # Check if binary already exists and prompt to overwrite
 TARGET_PATH="${INSTALL_DIR}/${BINARY_NAME}"
@@ -69,6 +79,7 @@ if [[ -f "$HOME/.orca/id_ed25519" ]]; then
     read -rp "Overwrite existing keys? This will re-provision the robot. [y/N] " answer </dev/tty
     if [[ "${answer,,}" == "y" ]]; then
         FORCE_FLAG="--force"
+        rm -f "$HOME/.orca/config.json" "$HOME/.orca/collector.json"
     else
         echo "Aborted." >&2
         exit 0
