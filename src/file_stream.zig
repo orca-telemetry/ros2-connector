@@ -314,7 +314,6 @@ pub const StreamWorker = struct {
                 continue;
             };
             defer self.allocator.free(presigned_url);
-            log.info("Presigned URL: {s}", .{presigned_url});
 
             uploadFile(self.allocator, self.log_dir, mcap_name, presigned_url) catch |err| {
                 if (err == error.UploadExpired) {
