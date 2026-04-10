@@ -2,7 +2,8 @@
 
 # --- Configuration (TOKEN is templated by the server) ---
 TOKEN="{{TOKEN}}"
-BASE_URL="https://github.com/orca-telemetry/ros2-connector/releases/download/v0.0.0"
+VERSION="{{VERSION}}"
+BASE_URL="https://github.com/orca-telemetry/ros2-connector/releases/download/${VERSION}"
 BINARY_NAME="orca"
 INSTALL_DIR="$HOME/.local/bin"
 SERVICE_NAME="orca-listen"
