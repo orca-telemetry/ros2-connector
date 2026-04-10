@@ -456,7 +456,9 @@ fn writeSessionMetadataImpl(
     sequence: u32,
 ) !void {
     const session_id_str = try std.fmt.allocPrint(allocator, "{d}", .{session_ns});
+    defer allocator.free(session_id_str);
     const seq_str = try std.fmt.allocPrint(allocator, "{d}", .{sequence});
+    defer allocator.free(seq_str);
 
     var entries = [_]mcap_mod.TupleStrStr{
         .{ .key = .{ .str = "robot_id" }, .value = .{ .str = robot_id } },

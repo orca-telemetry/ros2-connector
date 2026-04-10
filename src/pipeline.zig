@@ -87,6 +87,7 @@ fn loadTypeSupport(
         .{ pkg, msg_type },
         0,
     );
+    defer allocator.free(func_name);
 
     // Load the shared library containing the type support
     const lib_name = try std.fmt.allocPrintSentinel(
@@ -95,6 +96,7 @@ fn loadTypeSupport(
         .{pkg},
         0,
     );
+    defer allocator.free(lib_name);
 
     const handle = std.c.dlopen(lib_name.ptr, .{ .LAZY = true }) orelse
         return error.TypeSupportLibNotFound;
@@ -112,6 +114,10 @@ fn loadTypeSupport(
 
 pub const Pipeline = struct {
     arena: std.heap.ArenaAllocator,
+    scratch_arena: std.heap.ArenaAllocator,
+    /// The backing allocator (GPA). Used for per-message data that must be
+    /// individually freed after each flush, so it cannot live in an arena.
+    msg_allocator: std.mem.Allocator,
     node: *c.rcl_node_t,
     subs: []Subscription,
     buf_pool: MessageBufferPool,
@@ -129,6 +135,7 @@ pub const Pipeline = struct {
     ) !Pipeline {
         var arena = std.heap.ArenaAllocator.init(backing);
         const allocator = arena.allocator();
+        const scratch_arena = std.heap.ArenaAllocator.init(backing);
 
         const topics = cfg.topics;
 
@@ -151,8 +158,10 @@ pub const Pipeline = struct {
         }
 
         // 2. Init message buffer pool
+        // Uses backing allocator (GPA) so the buffers slice and all per-message data
+        // can be individually freed rather than accumulating in the arena.
         const write_buffer_bytes: usize = @as(usize, cfg.write_buffer_mb) * 1024 * 1024;
-        var buf_pool = try MessageBufferPool.init(allocator, specs, write_buffer_bytes);
+        var buf_pool = try MessageBufferPool.init(backing, specs, write_buffer_bytes);
 
         // 3. Init MCAP writer pool
         const max_duration_ns: u64 = @as(u64, cfg.max_bag_duration_s) * std.time.ns_per_s;
@@ -208,6 +217,8 @@ pub const Pipeline = struct {
 
         return .{
             .arena = arena,
+            .scratch_arena = scratch_arena,
+            .msg_allocator = backing,
             .node = node,
             .subs = subs,
             .buf_pool = buf_pool,
@@ -220,15 +231,16 @@ pub const Pipeline = struct {
     }
 
     pub fn deinit(self: *Pipeline) void {
-        const allocator = self.arena.allocator();
-        // Final flush — drain any remaining messages
-        self.writer_pool.forceFlushAll(&self.buf_pool, allocator) catch |err| {
+        const arena_alloc = self.arena.allocator();
+        // Final flush — drain any remaining messages.
+        self.writer_pool.forceFlushAll(&self.buf_pool, self.msg_allocator) catch |err| {
             std.debug.print("Warning: final flush failed: {}\n", .{err});
         };
         for (self.subs) |*sub| finiSubscription(sub, self.node);
         _ = c.rcl_wait_set_fini(&self.wait_set);
-        self.writer_pool.finish(allocator);
-        self.buf_pool.deinit(allocator);
+        self.writer_pool.finish(arena_alloc);
+        self.buf_pool.deinit(self.msg_allocator);
+        self.scratch_arena.deinit();
         self.arena.deinit();
     }
 
@@ -240,6 +252,10 @@ pub const Pipeline = struct {
         std.debug.print("Pipeline running, recording {} topics...\n", .{self.subs.len});
 
         while (running.load(.acquire)) {
+            // Free all per-iteration scratch allocations at end of each tick
+            defer _ = self.scratch_arena.reset(.retain_capacity);
+            const scratch = self.scratch_arena.allocator();
+
             // Arm wait set
             _ = c.rcl_wait_set_clear(&self.wait_set);
             for (self.subs) |*sub| {
@@ -249,10 +265,10 @@ pub const Pipeline = struct {
             // Block with 100ms timeout so we flush on quiet topics
             const ret = c.rcl_wait(&self.wait_set, 100 * std.time.ns_per_ms);
             if (ret == c.RCL_RET_TIMEOUT) {
-                try self.writer_pool.flushAll(&self.buf_pool, self.arena.allocator());
-                self.maybeRotate();
+                try self.writer_pool.flushAll(&self.buf_pool, self.msg_allocator);
+                self.maybeRotate(scratch);
                 self.writer_pool.periodicFsync();
-                self.status_reporter.maybeSend(self.arena.allocator(), &self.writer_pool, &self.buf_pool);
+                self.status_reporter.maybeSend(scratch, &self.writer_pool, &self.buf_pool);
                 continue;
             }
             if (ret != c.RCL_RET_OK) return error.WaitFailed;
@@ -264,16 +280,16 @@ pub const Pipeline = struct {
             }
 
             // Flush topics that have hit the message threshold
-            try self.writer_pool.flushAll(&self.buf_pool, self.arena.allocator());
+            try self.writer_pool.flushAll(&self.buf_pool, self.msg_allocator);
 
             // Check if file rotation is needed (duration or size limit)
-            self.maybeRotate();
+            self.maybeRotate(scratch);
             self.writer_pool.periodicFsync();
-            self.status_reporter.maybeSend(self.arena.allocator(), &self.writer_pool, &self.buf_pool);
+            self.status_reporter.maybeSend(scratch, &self.writer_pool, &self.buf_pool);
         }
     }
 
-    fn maybeRotate(self: *Pipeline) void {
+    fn maybeRotate(self: *Pipeline, scratch: std.mem.Allocator) void {
         if (!self.writer_pool.shouldRotate()) return;
 
         // Capture bytes from the completed file before rotation resets the counter
@@ -287,12 +303,12 @@ pub const Pipeline = struct {
         std.log.info("Rotated MCAP file: {s} -> {s}", .{ old_path, self.writer_pool.file_path });
 
         self.status_reporter.addBytesWritten(old_bytes);
-        self.runCleanup();
+        self.runCleanup(scratch);
     }
 
-    fn runCleanup(self: *Pipeline) void {
+    fn runCleanup(self: *Pipeline, scratch: std.mem.Allocator) void {
         const deleted = storage.cleanupOldFiles(
-            self.arena.allocator(),
+            scratch,
             self.log_dir_z,
             self.max_log_dir_size_mb,
         ) catch |err| {
@@ -328,9 +344,11 @@ pub const Pipeline = struct {
         else
             @intCast(std.time.nanoTimestamp());
 
-        // Copy the serialized bytes into the message buffer
+        // Copy the serialized bytes into the message buffer.
+        // Uses msg_allocator (GPA) so individual message data slices can be freed
+        // after writing rather than accumulating in an arena.
         const data = sub.serialized_msg.buffer[0..sub.serialized_msg.buffer_length];
-        sub.buf.push(self.arena.allocator(), data, timestamp_ns) catch |err| {
+        sub.buf.push(self.msg_allocator, data, timestamp_ns) catch |err| {
             std.debug.print("Warning: buffer push failed for {s}: {}\n", .{ sub.topic_name, err });
         };
     }
