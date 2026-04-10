@@ -28,7 +28,8 @@ echo "Detected architecture: ${ARCH} (using binary suffix: ${BINARY_SUFFIX})" >&
 
 cleanup_services() {
     for svc in orca-listen orca-stream; do
-        systemctl --user disable --now "${svc}.service" 2>/dev/null || true
+        systemctl --user stop    "${svc}.service" 2>/dev/null || true
+        systemctl --user disable "${svc}.service" 2>/dev/null || true
         rm -f "$HOME/.config/systemd/user/${svc}.service"
     done
     systemctl --user daemon-reload 2>/dev/null || true
